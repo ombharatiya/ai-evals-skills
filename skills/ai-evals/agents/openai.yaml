@@ -1,0 +1,9 @@
+# Codex metadata for the skill picker. Claude Code ignores this file.
+# Fields: https://developers.openai.com/codex/skills
+interface:
+  display_name: "AI Evals"
+  short_description: "Build and check evals the aievals.co way: error analysis, calibrated binary judges, intervals, release gates."
+  brand_color: "#2B4BE0"
+  default_prompt: "Use $ai-evals to add evals to this feature, starting from real traces."
+policy:
+  allow_implicit_invocation: true

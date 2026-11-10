@@ -1,0 +1,15 @@
+{
+  "name": "ai-evals-skills",
+  "owner": {
+    "name": "Om Bharatiya",
+    "url": "https://github.com/ombharatiya"
+  },
+  "description": "The ai-evals skill for Claude Code: eval practices from the aievals.co guide.",
+  "plugins": [
+    {
+      "name": "ai-evals",
+      "source": "./",
+      "description": "Eval practices for LLM apps, RAG and agents from aievals.co: error analysis first, binary judges calibrated against human labels, intervals on every number, paired release gates."
+    }
+  ]
+}

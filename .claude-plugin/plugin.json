@@ -1,0 +1,20 @@
+{
+  "name": "ai-evals",
+  "description": "Eval practices for LLM apps, RAG and agents from aievals.co: error analysis first, binary judges calibrated against human labels, intervals on every number, paired release gates.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Om Bharatiya",
+    "url": "https://www.aievals.co"
+  },
+  "homepage": "https://www.aievals.co",
+  "repository": "https://github.com/ombharatiya/ai-evals-skills",
+  "license": "CC-BY-4.0 AND MIT",
+  "keywords": [
+    "evals",
+    "llm-as-judge",
+    "error-analysis",
+    "rag",
+    "agents",
+    "testing"
+  ]
+}
