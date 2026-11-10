@@ -6,7 +6,7 @@ import pytest
 from evals.calibrate import bar_failures, calibrate
 from evals.data import load_jsonl, split_rows
 from evals.judge import JudgeConfig, JudgeError, Verdict, pick_few_shots
-from evals.run_eval import corrected_pass_rate, main as run_eval_main, rogan_gladen, score_rows
+from evals.run_eval import annotation_text, corrected_pass_rate, main as run_eval_main, rogan_gladen, score_rows
 from evals.runner import Budget, judge_rows
 from tests.fakes import FakeJudge
 
@@ -111,8 +111,9 @@ def _results_file(path, ids, passed=True):
     return path
 
 
-def test_run_eval_holds_on_a_tiny_or_unpaired_comparison(tmp_path, monkeypatch):
+def test_run_eval_is_invalid_on_a_tiny_or_unpaired_comparison(tmp_path, monkeypatch):
     # The review's case: a candidate sharing one id with the baseline used to ship.
+    # A broken comparison fails even when CI only fails on investigate.
     import evals.run_eval as run_eval
 
     rows = [{"id": f"r{i}", "query": "q", "response": "fine"} for i in range(10)]
@@ -123,11 +124,11 @@ def test_run_eval_holds_on_a_tiny_or_unpaired_comparison(tmp_path, monkeypatch):
     baseline = _results_file(tmp_path / "base.jsonl", ["r0"])
     monkeypatch.setattr(run_eval, "ClaudeJudge", lambda config: FakeJudge())
     code = run_eval_main(["--data", str(data), "--rubric", str(rubric), "--baseline", str(baseline),
-                          "--out", str(tmp_path / "runs")])
+                          "--fail-on", "investigate", "--out", str(tmp_path / "runs")])
     summary = json.loads(next((tmp_path / "runs").glob("*-eval/summary.json")).read_text())
-    assert code == 1 and summary["verdict"] == "hold"
+    assert code == 1 and summary["verdict"] == "invalid"
     assert summary["vs_baseline"]["unpaired_ids"] == [f"r{i}" for i in range(1, 10)]
-    assert any("paired rows" in h for h in summary["holds"])
+    assert any("paired rows" in h for h in summary["problems"])
     assert (next((tmp_path / "runs").glob("*-eval")) / "results.jsonl").exists()
 
 
@@ -161,7 +162,7 @@ def _run(tmp_path, monkeypatch, args, judge=None):
     return code, summary
 
 
-def test_run_eval_holds_when_the_candidate_drops_baseline_rows(tmp_path, monkeypatch):
+def test_run_eval_is_invalid_when_the_candidate_drops_baseline_rows(tmp_path, monkeypatch):
     # The re-review's case: 500 baseline rows, the candidate produced only 400.
     rows = [{"id": f"r{i}", "query": "q", "response": "fine"} for i in range(400)]
     data = _write_rows(tmp_path / "data.jsonl", rows)
@@ -169,8 +170,10 @@ def test_run_eval_holds_when_the_candidate_drops_baseline_rows(tmp_path, monkeyp
     rubric.write_text("R")
     base = _write_rows(tmp_path / "base.jsonl", [{"id": f"r{i}", "passed": True} for i in range(500)])
     code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric),
-                                                 "--baseline", str(base), "--indifference", "0.2"])
-    assert code == 1 and summary["verdict"] == "hold"
+                                                 "--baseline", str(base), "--indifference", "0.2",
+                                                 "--fail-on", "investigate"])
+    assert code == 1 and summary["verdict"] == "invalid"
+    assert summary["vs_baseline"]["band"] == "ship"  # the interval alone would have shipped
     assert len(summary["vs_baseline"]["missing_ids"]) == 100
 
     # A missing regression row blocks.
@@ -191,10 +194,11 @@ def test_run_eval_refuses_a_calibration_that_did_not_pass(tmp_path, monkeypatch)
               "report": {"pass_recall": 0.9, "fail_recall": 0.143}, "bar": {"passed": False}}
     cal = tmp_path / "summary.json"
     cal.write_text(json.dumps(failed))
-    code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric), "--calibration", str(cal)])
-    assert code == 1 and summary["verdict"] == "hold"
+    code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric), "--calibration", str(cal),
+                                                 "--fail-on", "investigate"])
+    assert code == 1 and summary["verdict"] == "invalid"
     assert "pass_rate_corrected" not in summary
-    assert any("passing test read" in h for h in summary["holds"])
+    assert any("passing test read" in h for h in summary["problems"])
 
 
 def test_calibrate_records_whether_it_passed(tmp_path, monkeypatch):
@@ -214,14 +218,25 @@ def test_calibrate_rejects_zero_repeats(capsys):
         calibrate_mod.main(["--data", "x", "--rubric", "y", "--repeats", "0"])
 
 
-def test_fail_on_lets_ci_report_a_hold_without_failing(tmp_path, monkeypatch):
-    rows = [{"id": f"r{i}", "query": "q", "response": "fine"} for i in range(20)]
+def test_fail_on_lets_ci_report_a_hold_without_failing(tmp_path, monkeypatch, capsys):
+    # 40 unchanged rows: a clean comparison whose interval is too wide to ship on.
+    rows = [{"id": f"r{i}", "query": "q", "response": "fine"} for i in range(40)]
     data = _write_rows(tmp_path / "data.jsonl", rows)
     rubric = tmp_path / "rubric.md"
     rubric.write_text("R")
-    base = _write_rows(tmp_path / "base.jsonl", [{"id": f"r{i}", "passed": True} for i in range(20)])
+    base = _write_rows(tmp_path / "base.jsonl", [{"id": f"r{i}", "passed": True} for i in range(40)])
     code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric), "--baseline", str(base)])
-    assert summary["verdict"] == "hold" and code == 1
+    assert summary["verdict"] == "hold" and summary["problems"] == [] and code == 1
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    capsys.readouterr()
     code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric), "--baseline", str(base),
-                                                 "--fail-on", "investigate,block"])
+                                                 "--fail-on", "investigate"])
     assert summary["verdict"] == "hold" and code == 0
+    annotation = [line for line in capsys.readouterr().out.splitlines() if line.startswith("::")]
+    # GitHub decodes %25 back to %.
+    assert annotation == ["::warning title=Release gate HOLD::delta +0.000, 95%25 CI [-0.088, +0.088], n=40; "
+                          "read the rows in results.jsonl (the eval-run artifact in CI)"]
+
+
+def test_annotations_escape_text_from_the_data():
+    assert annotation_text("id 100%\nnext") == "id 100%25%0Anext"

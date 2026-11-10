@@ -12,17 +12,19 @@ of the rubric. results.jsonl is written as soon as scoring finishes.
 
 With --baseline (an earlier results.jsonl), it pairs the two runs on their
 shared ids, computes the difference in pass rate with Newcombe's paired
-interval, and prints ship, hold, investigate or block. By default the exit code
-is 0 for ship (or a first run with no baseline) and 1 otherwise. In CI, pass
---fail-on investigate,block so a hold is reported for a person to read instead
-of failing every build; on GitHub Actions the verdict also shows as a warning
+interval, and prints ship, hold, investigate, block or invalid. By default the
+exit code is 0 for ship (or a first run with no baseline) and 1 otherwise. In
+CI, pass --fail-on investigate so a hold (an interval too wide to call either
+way) is reported for a person to read instead of failing every build; block
+and invalid always fail. On GitHub Actions the verdict also shows as a warning
 or error annotation on the pull request.
 
 Nothing ships silently:
-- any failing row marked "must_pass": true (the regression set) blocks
-- rows with no verdict, ids missing from the baseline, fewer than
-  --min-paired paired rows, or a judge that differs from the calibrated one
-  turn a ship into a hold
+- a failing or missing row marked "must_pass": true (the regression set) blocks
+- a broken measurement gives INVALID, which always fails: a judge that
+  differs from the calibrated one, a calibration record that isn't a passing
+  test read, rows with no verdict, rows missing on either side, fewer than
+  --min-paired paired rows, or verdicts from a fallback model
 """
 from __future__ import annotations
 
@@ -137,6 +139,11 @@ def read_baseline(path: str) -> tuple[dict[str, bool], set[str]]:
     return base, must_pass
 
 
+def annotation_text(text: str) -> str:
+    """Escape a GitHub Actions annotation message (ids come from your data)."""
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def read_calibration(path: str) -> dict:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -159,16 +166,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--indifference", type=float, default=0.01, help="ship when the whole interval is within this")
     p.add_argument("--minor-regression", type=float, default=0.02, help="a sure drop up to this is investigate")
     p.add_argument("--min-paired", type=int, default=30, help="fewest paired rows a ship can rest on")
-    p.add_argument("--fail-on", default="hold,investigate,block",
-                   help="verdicts that exit 1 (CI: investigate,block reports a hold for a person to read)")
+    p.add_argument("--fail-on", default="hold,investigate",
+                   help="which of hold and investigate exit 1; block and invalid always do "
+                        "(CI: investigate reports a hold for a person to read)")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--model", default=None)
     p.add_argument("--effort", default=None)
     p.add_argument("--out", default="runs")
     args = p.parse_args(argv)
     fail_on = {v.strip() for v in args.fail_on.split(",") if v.strip()}
-    if not fail_on <= {"hold", "investigate", "block"}:
-        p.error("--fail-on takes a comma list of hold, investigate and block")
+    if not fail_on <= {"hold", "investigate", "block", "invalid"}:
+        p.error("--fail-on takes a comma list of hold and investigate; block and invalid always fail")
 
     # Check every input before spending anything on judge calls.
     try:
@@ -196,15 +204,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"EVAL_BUDGET_USD is set but there's no price for {config.model} in evals/judge.py PRICES.", file=sys.stderr)
         return 2
 
-    holds: list[str] = []
+    problems: list[str] = []
     calibration_ok = False
     flip_rate = 0.0
     if calibration:
         bar = calibration.get("bar") or {}
         if calibration["judge"] != config.describe():
-            holds.append("this judge (model, effort, prompt or few-shots) differs from the calibrated one; calibrate again")
+            problems.append("this judge (model, effort, prompt or few-shots) differs from the calibrated one; calibrate again")
         elif calibration.get("split") != "test" or not bar.get("passed"):
-            holds.append("the calibration record isn't a passing test read; calibrate on dev until it clears the bar, then read test")
+            problems.append("the calibration record isn't a passing test read; calibrate on dev until it clears the bar, then read test")
         else:
             calibration_ok = True
         flips, scored = calibration.get("label_flips_across_repeats"), calibration.get("report", {}).get("n")
@@ -236,9 +244,9 @@ def main(argv: list[str] | None = None) -> int:
     errors = [r for r in results if r["error"]]
     fallbacks = sum(1 for r in results if r.get("fallback_used"))
     if errors:
-        holds.append(f"{len(errors)} rows have no verdict (refusal, budget or bad output); see results.jsonl")
+        problems.append(f"{len(errors)} rows have no verdict (refusal, budget or bad output); see results.jsonl")
     if fallbacks:
-        holds.append(f"{fallbacks} verdicts came from a fallback model, not the calibrated judge")
+        problems.append(f"{fallbacks} verdicts came from a fallback model, not the calibrated judge")
 
     summary: dict = {
         "date": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -265,29 +273,28 @@ def main(argv: list[str] | None = None) -> int:
         cand = {r["id"]: bool(r["passed"]) for r in known}
         unpaired = sorted(set(cand) - set(base))
         if unpaired:
-            holds.append(f"{len(unpaired)} ids aren't in the baseline and weren't compared: {', '.join(unpaired[:10])}")
+            problems.append(f"{len(unpaired)} ids aren't in the baseline and weren't compared: {', '.join(unpaired[:10])}")
         absent = sorted(set(base) - {r["id"] for r in results})
         if absent:
-            holds.append(f"{len(absent)} baseline ids are missing from this run: {', '.join(absent[:10])}")
+            problems.append(f"{len(absent)} baseline ids are missing from this run: {', '.join(absent[:10])}")
         absent_must = sorted(set(absent) & base_must_pass)
         if absent_must:
             # A regression row the candidate didn't produce can't count as passing.
             must_fail = must_fail + absent_must
             summary["must_pass_failures"] = must_fail
         if not set(cand) & set(base):
-            print("The baseline shares no scored ids with this run.", file=sys.stderr)
-            (out_dir / "summary.json").write_text(dumps(summary, indent=2) + "\n")
-            return 1
-        d = paired_delta(base, cand)
-        verdict = band(d, indifference=args.indifference, minor_regression=args.minor_regression)
-        if d.n < args.min_paired:
-            holds.append(f"only {d.n} paired rows; a ship needs at least {args.min_paired}")
-        summary["vs_baseline"] = {
-            "n": d.n, "baseline_rate": d.baseline_rate, "candidate_rate": d.candidate_rate,
-            "delta": d.delta, "ci": list(d.ci), "band": verdict, "unpaired_ids": unpaired, "missing_ids": absent,
-            "paired_counts": {"both_pass": d.both_pass, "baseline_only": d.baseline_only,
-                              "candidate_only": d.candidate_only, "both_fail": d.both_fail},
-        }
+            problems.append("the baseline shares no scored ids with this run, so nothing was compared")
+        else:
+            d = paired_delta(base, cand)
+            verdict = band(d, indifference=args.indifference, minor_regression=args.minor_regression)
+            if d.n < args.min_paired:
+                problems.append(f"only {d.n} paired rows; a verdict needs at least {args.min_paired}")
+            summary["vs_baseline"] = {
+                "n": d.n, "baseline_rate": d.baseline_rate, "candidate_rate": d.candidate_rate,
+                "delta": d.delta, "ci": list(d.ci), "band": verdict, "unpaired_ids": unpaired, "missing_ids": absent,
+                "paired_counts": {"both_pass": d.both_pass, "baseline_only": d.baseline_only,
+                                  "candidate_only": d.candidate_only, "both_fail": d.both_fail},
+            }
     # The gate set's resolution: how wide the interval is for an unchanged
     # candidate, and how many rows the indifference window needs.
     res_n, res_rate = (summary["vs_baseline"]["n"], summary["vs_baseline"]["baseline_rate"]) if "vs_baseline" in summary else (len(known), rate)
@@ -308,12 +315,15 @@ def main(argv: list[str] | None = None) -> int:
                 + (f", or grow the gate set past {needed} rows" if needed else "")
             )
     summary["notes"] = notes
+    # Integrity problems mean the measurement itself can't be trusted, so they
+    # always fail, whatever --fail-on says. --fail-on only decides whether an
+    # honest hold (an interval too wide to call) or an investigate fails.
     if must_fail:
         verdict = "block"
-    elif holds and verdict in ("ship", "baseline"):
-        verdict = "hold"
+    elif problems:
+        verdict = "invalid"
     summary["verdict"] = verdict
-    summary["holds"] = holds
+    summary["problems"] = problems
     (out_dir / "summary.json").write_text(dumps(summary, indent=2) + "\n")
 
     print(f"pass-all rate {rate:.3f}  95% CI [{lo:.2f}, {hi:.2f}]  n={len(known)}  judge={config.model}@{config.effort}")
@@ -328,18 +338,24 @@ def main(argv: list[str] | None = None) -> int:
               f"95% CI [{v['ci'][0]:+.3f}, {v['ci'][1]:+.3f}]  n={v['n']}  band={v['band']}")
     if must_fail:
         print(f"  regression set failures: {', '.join(must_fail)}")
-    for reason in holds:
-        print(f"  hold: {reason}")
+    for reason in problems:
+        print(f"  problem: {reason}")
     for note in notes:
         print(f"  note: {note}")
     print(f"  estimated cost ${summary['estimated_cost_usd']:.2f}")
     print(f"verdict: {verdict.upper()}   wrote {out_dir}")
-    failed = verdict in fail_on
+    failed = verdict in ("block", "invalid") or verdict in fail_on
     if os.environ.get("GITHUB_ACTIONS") == "true" and verdict not in ("ship", "baseline"):
         # Show the verdict on the pull request even when it doesn't fail the job.
         level = "error" if failed else "warning"
-        reasons = "; ".join(holds + ([f"regression rows failed: {', '.join(must_fail)}"] if must_fail else []))
-        print(f"::{level} title=Release gate {verdict.upper()}::{reasons or 'see the eval summary'}")
+        details = list(problems)
+        if must_fail:
+            details.append(f"regression rows failed: {', '.join(must_fail)}")
+        if "vs_baseline" in summary:
+            v = summary["vs_baseline"]
+            details.append(f"delta {v['delta']:+.3f}, 95% CI [{v['ci'][0]:+.3f}, {v['ci'][1]:+.3f}], n={v['n']}")
+        details.append("read the rows in results.jsonl (the eval-run artifact in CI)")
+        print(f"::{level} title=Release gate {verdict.upper()}::{annotation_text('; '.join(details))}")
     return 1 if failed else 0
 
 

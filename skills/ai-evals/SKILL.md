@@ -159,8 +159,10 @@ Three tiers: a smoke tier of 10 to 50 deterministic assertions on every push (no
 a full tier with the calibrated judge on PRs that change prompts or models, and a nightly
 tier with the expanded regression and robustness sets. Post a baseline-versus-candidate
 table on the PR with the delta, its 95% interval and a ship, hold, investigate or block
-verdict. Fail the job on investigate, block or a regression-set failure, and report a hold
-for a named person to read: a hold means the interval can't tell the change from no change.
+verdict. Fail the job on investigate, block, a regression-set failure or a broken
+measurement (rows with no verdict, rows missing on either side, a judge that isn't the
+calibrated one), and report a hold for a named person to read: a hold means the interval
+can't tell the change from no change.
 Size the indifference window from an A/A run of the unchanged system, not from the zero-noise
 floor. No silent overrides: an override needs a named person and a written reason. Fork
 PRs get no API secrets. Details in [references/ci-and-release-gates.md](references/ci-and-release-gates.md).

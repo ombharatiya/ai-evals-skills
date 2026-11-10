@@ -9,16 +9,19 @@
  * The run reports the pass-all rate with a Wilson interval and a per-check
  * drill-down, and writes results.jsonl as soon as scoring finishes. With
  * --baseline it pairs the runs on shared ids, computes the difference with
- * Newcombe's paired interval, and prints ship / hold / investigate / block.
- * By default the exit code is 0 for ship (or a first run with no baseline) and
- * 1 otherwise. In CI, pass --fail-on investigate,block so a hold is reported
- * for a person to read instead of failing every build; on GitHub Actions the
- * verdict also shows as an annotation on the pull request.
+ * Newcombe's paired interval, and prints ship / hold / investigate / block /
+ * invalid. By default the exit code is 0 for ship (or a first run with no
+ * baseline) and 1 otherwise. In CI, pass --fail-on investigate so a hold (an
+ * interval too wide to call either way) is reported for a person to read
+ * instead of failing every build; block and invalid always fail. On GitHub
+ * Actions the verdict also shows as an annotation on the pull request.
  *
- * Nothing ships silently: a failing "must_pass" row blocks; rows with no
- * verdict, ids missing from the baseline, fewer than --min-paired paired rows,
- * fallback verdicts, or a judge that differs from the calibrated one turn a
- * ship into a hold.
+ * Nothing ships silently:
+ * - a failing or missing row marked "must_pass": true (the regression set) blocks
+ * - a broken measurement gives INVALID, which always fails: a judge that
+ *   differs from the calibrated one, a calibration record that isn't a passing
+ *   test read, rows with no verdict, rows missing on either side, fewer than
+ *   --min-paired paired rows, or verdicts from a fallback model
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -126,6 +129,11 @@ export function readBaseline(path: string): { base: Map<string, boolean>; mustPa
   return { base, mustPass };
 }
 
+/** Escape a GitHub Actions annotation message (ids come from your data). */
+export function annotationText(text: string): string {
+  return text.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+}
+
 interface CalibrationRecord {
   judge?: unknown;
   split?: string;
@@ -160,7 +168,7 @@ async function main(): Promise<number> {
       indifference: { type: "string", default: "0.01" },
       "minor-regression": { type: "string", default: "0.02" },
       "min-paired": { type: "string", default: "30" },
-      "fail-on": { type: "string", default: "hold,investigate,block" },
+      "fail-on": { type: "string", default: "hold,investigate" },
       workers: { type: "string", default: "4" },
       model: { type: "string" },
       effort: { type: "string" },
@@ -177,8 +185,8 @@ async function main(): Promise<number> {
   try {
     if (values.effort && !EFFORTS.includes(values.effort as Effort)) throw new Error("--effort must be one of " + EFFORTS.join(", "));
     const failOn = new Set((values["fail-on"] ?? "").split(",").map((v) => v.trim()).filter(Boolean));
-    if ([...failOn].some((v) => !["hold", "investigate", "block"].includes(v))) {
-      throw new Error("--fail-on takes a comma list of hold, investigate and block");
+    if ([...failOn].some((v) => !["hold", "investigate", "block", "invalid"].includes(v))) {
+      throw new Error("--fail-on takes a comma list of hold and investigate; block and invalid always fail");
     }
     setup = {
       failOn,
@@ -215,15 +223,15 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const holds: string[] = [];
+  const problems: string[] = [];
   let calibrationOk = false;
   let flipRate = 0;
   if (setup.calibration) {
     const cal = setup.calibration;
     if (JSON.stringify(cal.judge) !== JSON.stringify(describe(config))) {
-      holds.push("this judge (model, effort, prompt or few-shots) differs from the calibrated one; calibrate again");
+      problems.push("this judge (model, effort, prompt or few-shots) differs from the calibrated one; calibrate again");
     } else if (cal.split !== "test" || !cal.bar?.passed) {
-      holds.push("the calibration record isn't a passing test read; calibrate on dev until it clears the bar, then read test");
+      problems.push("the calibration record isn't a passing test read; calibrate on dev until it clears the bar, then read test");
     } else {
       calibrationOk = true;
     }
@@ -249,8 +257,8 @@ async function main(): Promise<number> {
   let mustFail = results.filter((r) => r.must_pass && r.passed === false).map((r) => r.id);
   const errors = results.filter((r) => r.error);
   const fallbacks = results.filter((r) => r.fallback_used).length;
-  if (errors.length) holds.push(errors.length + " rows have no verdict (refusal, budget or bad output); see results.jsonl");
-  if (fallbacks) holds.push(fallbacks + " verdicts came from a fallback model, not the calibrated judge");
+  if (errors.length) problems.push(errors.length + " rows have no verdict (refusal, budget or bad output); see results.jsonl");
+  if (fallbacks) problems.push(fallbacks + " verdicts came from a fallback model, not the calibrated judge");
 
   const summary: Record<string, unknown> = {
     date: new Date().toISOString(),
@@ -272,15 +280,15 @@ async function main(): Promise<number> {
   }
 
   // Without a baseline there is nothing to compare: this run becomes the baseline.
-  let verdict: Band | "baseline" = "baseline";
+  let verdict: Band | "baseline" | "invalid" = "baseline";
   if (setup.baseline) {
     const { base, mustPass } = setup.baseline;
     const cand = new Map(known.map((r) => [r.id, r.passed as boolean]));
     const unpaired = [...cand.keys()].filter((id) => !base.has(id)).sort();
-    if (unpaired.length) holds.push(unpaired.length + " ids aren't in the baseline and weren't compared: " + unpaired.slice(0, 10).join(", "));
+    if (unpaired.length) problems.push(unpaired.length + " ids aren't in the baseline and weren't compared: " + unpaired.slice(0, 10).join(", "));
     const produced = new Set(results.map((r) => r.id));
     const absent = [...base.keys()].filter((id) => !produced.has(id)).sort();
-    if (absent.length) holds.push(absent.length + " baseline ids are missing from this run: " + absent.slice(0, 10).join(", "));
+    if (absent.length) problems.push(absent.length + " baseline ids are missing from this run: " + absent.slice(0, 10).join(", "));
     const absentMust = absent.filter((id) => mustPass.has(id));
     if (absentMust.length) {
       // A regression row the candidate didn't produce can't count as passing.
@@ -288,24 +296,23 @@ async function main(): Promise<number> {
       summary.must_pass_failures = mustFail;
     }
     if (![...cand.keys()].some((id) => base.has(id))) {
-      console.error("The baseline shares no scored ids with this run.");
-      writeFileSync(join(outDir, "summary.json"), dumps(summary, 2) + "\n");
-      return 1;
+      problems.push("the baseline shares no scored ids with this run, so nothing was compared");
+    } else {
+      const d = pairedDelta(base, cand);
+      verdict = band(d, setup.indifference, setup.minorRegression);
+      if (d.n < setup.minPaired) problems.push("only " + d.n + " paired rows; a verdict needs at least " + setup.minPaired);
+      summary.vs_baseline = {
+        n: d.n,
+        baseline_rate: d.baseline_rate,
+        candidate_rate: d.candidate_rate,
+        delta: d.delta,
+        ci: d.ci,
+        band: verdict,
+        unpaired_ids: unpaired,
+        missing_ids: absent,
+        paired_counts: { both_pass: d.both_pass, baseline_only: d.baseline_only, candidate_only: d.candidate_only, both_fail: d.both_fail },
+      };
     }
-    const d = pairedDelta(base, cand);
-    verdict = band(d, setup.indifference, setup.minorRegression);
-    if (d.n < setup.minPaired) holds.push("only " + d.n + " paired rows; a ship needs at least " + setup.minPaired);
-    summary.vs_baseline = {
-      n: d.n,
-      baseline_rate: d.baseline_rate,
-      candidate_rate: d.candidate_rate,
-      delta: d.delta,
-      ci: d.ci,
-      band: verdict,
-      unpaired_ids: unpaired,
-      missing_ids: absent,
-      paired_counts: { both_pass: d.both_pass, baseline_only: d.baseline_only, candidate_only: d.candidate_only, both_fail: d.both_fail },
-    };
   }
   // The gate set's resolution: how wide the interval is for an unchanged
   // candidate, and how many rows the indifference window needs.
@@ -328,10 +335,13 @@ async function main(): Promise<number> {
     }
   }
   summary.notes = notes;
+  // Integrity problems mean the measurement itself can't be trusted, so they
+  // always fail, whatever --fail-on says. --fail-on only decides whether an
+  // honest hold (an interval too wide to call) or an investigate fails.
   if (mustFail.length) verdict = "block";
-  else if (holds.length && (verdict === "ship" || verdict === "baseline")) verdict = "hold";
+  else if (problems.length) verdict = "invalid";
   summary.verdict = verdict;
-  summary.holds = holds;
+  summary.problems = problems;
   writeFileSync(join(outDir, "summary.json"), dumps(summary, 2) + "\n");
 
   console.log("pass-all rate " + (Number.isFinite(rate) ? rate.toFixed(3) : "n/a") + "  95% CI [" + lo.toFixed(2) + ", " + hi.toFixed(2) + "]  n=" + known.length + "  judge=" + config.model + "@" + config.effort);
@@ -339,20 +349,23 @@ async function main(): Promise<number> {
   for (const [name, count] of Object.entries(checkFails).sort()) console.log("  code check " + name + ": " + count + " failed");
   console.log("  judge: " + judgeFails + " failed");
   const vs = summary.vs_baseline as { n: number; baseline_rate: number; candidate_rate: number; delta: number; ci: [number, number]; band: Band } | undefined;
+  const sign = (x: number) => (x >= 0 ? "+" : "") + x.toFixed(3);
   if (vs) {
-    const sign = (x: number) => (x >= 0 ? "+" : "") + x.toFixed(3);
     console.log("  vs baseline: " + vs.baseline_rate.toFixed(3) + " -> " + vs.candidate_rate.toFixed(3) + "  delta " + sign(vs.delta) + "  95% CI [" + sign(vs.ci[0]) + ", " + sign(vs.ci[1]) + "]  n=" + vs.n + "  band=" + vs.band);
   }
   if (mustFail.length) console.log("  regression set failures: " + mustFail.join(", "));
-  for (const reason of holds) console.log("  hold: " + reason);
+  for (const reason of problems) console.log("  problem: " + reason);
   for (const note of notes) console.log("  note: " + note);
   console.log("  estimated cost $" + (summary.estimated_cost_usd as number).toFixed(2));
   console.log("verdict: " + verdict.toUpperCase() + "   wrote " + outDir);
-  const failed = setup.failOn.has(verdict);
+  const failed = verdict === "block" || verdict === "invalid" || setup.failOn.has(verdict);
   if (process.env.GITHUB_ACTIONS === "true" && verdict !== "ship" && verdict !== "baseline") {
     // Show the verdict on the pull request even when it doesn't fail the job.
-    const reasons = [...holds, ...(mustFail.length ? ["regression rows failed: " + mustFail.join(", ")] : [])].join("; ");
-    console.log("::" + (failed ? "error" : "warning") + " title=Release gate " + verdict.toUpperCase() + "::" + (reasons || "see the eval summary"));
+    const details = [...problems];
+    if (mustFail.length) details.push("regression rows failed: " + mustFail.join(", "));
+    if (vs) details.push("delta " + sign(vs.delta) + ", 95% CI [" + sign(vs.ci[0]) + ", " + sign(vs.ci[1]) + "], n=" + vs.n);
+    details.push("read the rows in results.jsonl (the eval-run artifact in CI)");
+    console.log("::" + (failed ? "error" : "warning") + " title=Release gate " + verdict.toUpperCase() + "::" + annotationText(details.join("; ")));
   }
   return failed ? 1 : 0;
 }

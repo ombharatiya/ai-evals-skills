@@ -57,13 +57,14 @@ npm run eval -- --data data/outputs.example.jsonl --rubric rubrics/refund_policy
 
 With `--baseline`, the verdict reads the 95% interval of the paired difference (Newcombe's
 interval) against a 1-point indifference window and a 2-point minor-regression window:
-ship exits 0, and hold, investigate or block exit 1.
+ship exits 0, and hold, investigate or block exit 1. An invalid run (below) also exits 1,
+whatever `--fail-on` says.
 
 Some conditions override the band:
 
 - **Block.** A failing `"must_pass": true` row blocks, and so does a baseline `must_pass` row
   that's missing from this run.
-- **Hold.** Any of these turns a ship into a hold:
+- **Invalid.** Any of these makes the run INVALID, whatever the interval says:
   - rows with no verdict
   - candidate ids missing from the baseline, or baseline ids missing from this run
   - fewer than 30 paired rows (`--min-paired`)
@@ -85,8 +86,9 @@ These figures are floors. When CI regenerates outputs on every pull request, gen
 noise and judge noise widen the interval further, so size the window from an A/A run:
 generate and score the unchanged system twice, compare the second run with the first using
 `--baseline`, and set `--indifference` a little above the interval that prints. In CI, pass
-`--fail-on investigate,block`: a hold then shows as a warning on the pull request for a
-person to read, and only a confirmed regression or a regression-set failure fails the job.
+`--fail-on investigate`: a hold then shows as a warning on the pull request, with the delta
+and its interval, for a person to read. The job fails on a confirmed regression
+(investigate or block), a regression-set failure, or an invalid run.
 
 ## Pinning and cost
 
@@ -99,7 +101,7 @@ person to read, and only a confirmed regression or a regression-set failure fail
   included. It must be a plain number. With a budget set, a model missing from `PRICES` in
   `src/judge.ts` is refused.
 - Refusal fallbacks are on (`fallbacks: "default"`). A verdict served by a fallback model is
-  counted in the summary and holds a release, because that model wasn't the one you
+  counted in the summary and makes the run invalid, because that model wasn't the one you
   calibrated.
 
 ## Files

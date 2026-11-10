@@ -23,9 +23,11 @@ Rules:
 - Fork PRs don't get API secrets. Never check out untrusted PR code in a job that has them.
 - Post a result table on the PR: baseline, candidate, difference, 95% interval, and a
   one-line verdict (ship, hold, investigate or block). Template in [templates.md](templates.md).
-- Fail the job on investigate, block and regression-set failures. Report a hold for a named
-  person to read the regressed slice; failing the build on every hold trains people to
-  ignore red checks. The starters do this with `--fail-on investigate,block`.
+- Fail the job on investigate, block, regression-set failures and broken measurements: rows
+  with no verdict, rows missing on either side, too few paired rows, fallback verdicts, or a
+  judge that isn't the calibrated one. Report a hold for a named person to read; failing the
+  build on every hold trains people to ignore red checks. The starters do this with
+  `--fail-on investigate`, and report a broken measurement as INVALID, which always fails.
 - No silent overrides. An override needs a named person and a written reason, logged where
   it can be queried. A pattern of overrides means the bands need retuning.
 - A CI eval that never fails isn't testing anything. The regression set is the one suite

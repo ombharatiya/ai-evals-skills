@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe as group, expect, it } from "vitest";
 import { describe, makeConfig } from "../src/judge.js";
 import { noChangeHalfwidth, rowsForIndifference } from "../src/gate.js";
 import { estimateCost } from "../src/judge.js";
+import { annotationText } from "../src/run-eval.js";
 import type Anthropic from "@anthropic-ai/sdk";
 
 const run = promisify(execFile);
@@ -47,30 +48,34 @@ function writeLines(path: string, rows: unknown[]) {
   return path;
 }
 
-async function runEval(dir: string, args: string[]) {
+async function runEval(dir: string, args: string[], env: Record<string, string> = {}) {
   const out = join(dir, "runs");
   let code = 0;
+  let stdout = "";
   try {
-    await run(join(root, "node_modules/.bin/tsx"), [join(root, "src/run-eval.ts"), ...args, "--out", out], {
-      env: { ...process.env, ANTHROPIC_API_KEY: "test-key", ANTHROPIC_BASE_URL: baseUrl, EVAL_BUDGET_USD: "" },
-    });
+    ({ stdout } = await run(join(root, "node_modules/.bin/tsx"), [join(root, "src/run-eval.ts"), ...args, "--out", out], {
+      env: { ...process.env, GITHUB_ACTIONS: "", ANTHROPIC_API_KEY: "test-key", ANTHROPIC_BASE_URL: baseUrl, EVAL_BUDGET_USD: "", ...env },
+    }));
   } catch (err) {
     code = (err as { code?: number }).code ?? 1;
+    stdout = (err as { stdout?: string }).stdout ?? "";
   }
   const runDir = readdirSync(out).filter((d) => d.endsWith("-eval")).sort().pop()!;
-  return { code, summary: JSON.parse(readFileSync(join(out, runDir, "summary.json"), "utf8")) };
+  return { code, stdout, summary: JSON.parse(readFileSync(join(out, runDir, "summary.json"), "utf8")) };
 }
 
 group("run-eval CLI", () => {
-  it("holds when the candidate drops baseline rows, and blocks when one was a regression row", async () => {
+  it("is invalid when the candidate drops baseline rows, and blocks when one was a regression row", async () => {
     const dir = mkdtempSync(join(tmpdir(), "cli-"));
     const rubric = join(dir, "rubric.md");
     writeFileSync(rubric, "R");
     const data = writeLines(join(dir, "data.jsonl"), Array.from({ length: 400 }, (_, i) => ({ id: "r" + i, query: "q", response: "fine" })));
     const base = writeLines(join(dir, "base.jsonl"), Array.from({ length: 500 }, (_, i) => ({ id: "r" + i, passed: true })));
-    let r = await runEval(dir, ["--data", data, "--rubric", rubric, "--baseline", base, "--indifference", "0.2"]);
+    // A broken comparison fails even when CI only fails on investigate.
+    let r = await runEval(dir, ["--data", data, "--rubric", rubric, "--baseline", base, "--indifference", "0.2", "--fail-on", "investigate"]);
     expect(r.code).toBe(1);
-    expect(r.summary.verdict).toBe("hold");
+    expect(r.summary.verdict).toBe("invalid");
+    expect(r.summary.vs_baseline.band).toBe("ship"); // the interval alone would have shipped
     expect(r.summary.vs_baseline.missing_ids).toHaveLength(100);
 
     const base2 = writeLines(join(dir, "base2.jsonl"), Array.from({ length: 500 }, (_, i) => ({ id: "r" + i, passed: true, must_pass: i === 450 })));
@@ -87,9 +92,10 @@ group("run-eval CLI", () => {
     const data = writeLines(join(dir, "data.jsonl"), [{ id: "a", query: "q", response: "r" }]);
     const cal = join(dir, "summary.json");
     writeFileSync(cal, JSON.stringify({ judge: describe(makeConfig("R")), split: "test", report: { pass_recall: 0.9, fail_recall: 0.143 }, bar: { passed: false } }));
-    const r = await runEval(dir, ["--data", data, "--rubric", rubric, "--calibration", cal]);
+    const r = await runEval(dir, ["--data", data, "--rubric", rubric, "--calibration", cal, "--fail-on", "investigate"]);
     expect(r.code).toBe(1);
-    expect(r.summary.verdict).toBe("hold");
+    expect(r.summary.verdict).toBe("invalid");
+    expect(r.summary.problems.some((p: string) => p.includes("passing test read"))).toBe(true);
     expect(r.summary).not.toHaveProperty("pass_rate_corrected");
   }, 60_000);
 });
@@ -113,17 +119,27 @@ group("parity with the Python starter", () => {
 });
 
 group("run-eval --fail-on", () => {
-  it("reports a hold without failing when CI asks only to fail on investigate and block", async () => {
+  it("reports a hold without failing when CI asks only to fail on investigate", async () => {
+    // 40 unchanged rows: a clean comparison whose interval is too wide to ship on.
     const dir = mkdtempSync(join(tmpdir(), "cli-"));
     const rubric = join(dir, "rubric.md");
     writeFileSync(rubric, "R");
-    const data = writeLines(join(dir, "data.jsonl"), Array.from({ length: 20 }, (_, i) => ({ id: "r" + i, query: "q", response: "fine" })));
-    const base = writeLines(join(dir, "base.jsonl"), Array.from({ length: 20 }, (_, i) => ({ id: "r" + i, passed: true })));
+    const data = writeLines(join(dir, "data.jsonl"), Array.from({ length: 40 }, (_, i) => ({ id: "r" + i, query: "q", response: "fine" })));
+    const base = writeLines(join(dir, "base.jsonl"), Array.from({ length: 40 }, (_, i) => ({ id: "r" + i, passed: true })));
     const strict = await runEval(dir, ["--data", data, "--rubric", rubric, "--baseline", base]);
     expect(strict.summary.verdict).toBe("hold");
+    expect(strict.summary.problems).toEqual([]);
     expect(strict.code).toBe(1);
-    const ci = await runEval(dir, ["--data", data, "--rubric", rubric, "--baseline", base, "--fail-on", "investigate,block"]);
+    const ci = await runEval(dir, ["--data", data, "--rubric", rubric, "--baseline", base, "--fail-on", "investigate"], { GITHUB_ACTIONS: "true" });
     expect(ci.summary.verdict).toBe("hold");
     expect(ci.code).toBe(0);
+    // GitHub decodes %25 back to %.
+    expect(ci.stdout.split("\n").filter((l) => l.startsWith("::"))).toEqual([
+      "::warning title=Release gate HOLD::delta +0.000, 95%25 CI [-0.088, +0.088], n=40; read the rows in results.jsonl (the eval-run artifact in CI)",
+    ]);
   }, 60_000);
+
+  it("escapes annotation text that comes from the data", () => {
+    expect(annotationText("id 100%\nnext")).toBe("id 100%25%0Anext");
+  });
 });

@@ -97,13 +97,14 @@ windows:
 | hold | the interval contains zero and reaches outside the indifference window | 1 |
 | investigate | the interval sits below zero and the drop is within the 2-point minor-regression window (`--minor-regression`) | 1 |
 | block | the interval sits below zero and the drop is larger | 1 |
+| invalid | the measurement can't be trusted (the conditions below) | 1, whatever `--fail-on` says |
 
 Some conditions override the band:
 
 - **Block.** Any failing row marked `"must_pass": true` blocks, and so does a baseline
   `must_pass` row that's missing from this run. Give regression rows code checks where you
   can, so they don't depend on the judge.
-- **Hold.** Any of these turns a ship into a hold:
+- **Invalid.** Any of these makes the run INVALID, whatever the interval says:
   - a row with no verdict (a refusal, a budget stop, malformed output)
   - candidate ids missing from the baseline, or baseline ids missing from this run
   - fewer than 30 paired rows (`--min-paired`)
@@ -111,7 +112,8 @@ Some conditions override the band:
   - a judge whose fingerprint differs from the calibration record
   - a calibration record that isn't a passing test read
 - **Exit code.** A first run with no baseline exits 0, unless one of the conditions above
-  applies.
+  applies. Block and invalid always exit 1; `--fail-on` decides only whether a hold or an
+  investigate does.
 
 `results.jsonl` is written as soon as scoring finishes, and every input file is checked
 before the first judge call.
@@ -128,8 +130,9 @@ These figures are floors. When CI regenerates outputs on every pull request, gen
 noise and judge noise widen the interval further, so size the window from an A/A run:
 generate and score the unchanged system twice, compare the second run with the first using
 `--baseline`, and set `--indifference` a little above the interval that prints. In CI, pass
-`--fail-on investigate,block`: a hold then shows as a warning on the pull request for a
-person to read, and only a confirmed regression or a regression-set failure fails the job.
+`--fail-on investigate`: a hold then shows as a warning on the pull request, with the delta
+and its interval, for a person to read. The job fails on a confirmed regression
+(investigate or block), a regression-set failure, or an invalid run.
 
 ## Pinning and cost
 
@@ -145,8 +148,8 @@ person to read, and only a confirmed regression or a regression-set failure fail
   run uncapped by accident.
 - The judge sends `fallbacks: "default"`: if Claude declines a request on a safety
   classifier, the API reruns it on a fallback model in the same call. Those verdicts come
-  from a model you didn't calibrate, so they are counted in every summary and hold a
-  release.
+  from a model you didn't calibrate, so they are counted in every summary and make the run
+  invalid.
 
 ## Files
 
