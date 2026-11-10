@@ -9,7 +9,7 @@ This repo has three parts:
 
 | | What it is | For |
 |---|---|---|
-| [`skills/ai-evals`](skills/ai-evals/SKILL.md) | A skill: ground rules, five workflows and six reference files | Claude Code, and other agents that read Agent Skills |
+| [`skills/ai-evals`](skills/ai-evals/SKILL.md) | A skill: ground rules, five workflows and six reference files | Claude Code, Codex, and other agents that read Agent Skills |
 | [`rules/`](rules/) | The same ground rules, condensed | Cursor (`.mdc`) and any agent that reads `AGENTS.md` |
 | [`starters/`](starters/) | Working Python and TypeScript harnesses: judge, calibration, release gate | Copying into your repo |
 
@@ -35,14 +35,35 @@ mkdir -p ~/.claude/skills && cp -r ai-evals-skills/skills/ai-evals ~/.claude/ski
 Use `.claude/skills/` inside a project instead of `~/.claude/skills/` to share it with
 your team through git.
 
+### Codex
+
+The same skill folder works in Codex. Ask Codex's built-in installer:
+
+```text
+$skill-installer install https://github.com/ombharatiya/ai-evals-skills/tree/main/skills/ai-evals
+```
+
+Or copy it yourself, then restart Codex:
+
+```bash
+git clone https://github.com/ombharatiya/ai-evals-skills.git
+mkdir -p ~/.agents/skills && cp -r ai-evals-skills/skills/ai-evals ~/.agents/skills/
+```
+
+Use `.agents/skills/` at your repo root instead to share it with your team. Codex picks the
+skill up on its own when a task matches, or you can call it with `$ai-evals` or from
+`/skills`. The folder's [`agents/openai.yaml`](skills/ai-evals/agents/openai.yaml) gives
+it a name and description in Codex's skill picker.
+
 ### Cursor
 
 Copy [`rules/cursor/ai-evals.mdc`](rules/cursor/ai-evals.mdc) into your project's
 `.cursor/rules/` folder.
 
-### Codex and other agents that read AGENTS.md
+### Other agents that read AGENTS.md
 
 Paste [`rules/agents/AGENTS.md`](rules/agents/AGENTS.md) into your repo's `AGENTS.md`.
+Codex reads it too, if you'd rather have always-on rules than a skill.
 
 ## What the skill makes your agent do
 
