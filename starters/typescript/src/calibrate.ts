@@ -20,7 +20,7 @@ import { isMain, numberFlag } from "./cli.js";
 import { classCounts, dumps, fileSha256, loadJsonl, readText, splitRows, writeJsonl, type Label, type Row } from "./data.js";
 import { EFFORTS, claudeJudge, describe, makeConfig, pickFewShots, priceKnown, setupProblem, type Effort, type Judge, type JudgeConfig } from "./judge.js";
 import { judgeReport } from "./metrics.js";
-import { Budget, judgeRows } from "./runner.js";
+import { BUDGET_STOP, Budget, judgeRows } from "./runner.js";
 
 export const TRAIN_FRACTION = 0.15;
 export const DEV_FRACTION = 0.4;
@@ -80,6 +80,8 @@ export async function calibrate(opts: {
     split_class_counts: classCounts(part),
     report,
     errors: first.filter((o) => o.error).length,
+    // Calls the budget kept from running, in any repeat: the bar can't be read then.
+    budget_stopped_calls: runs.flat().filter((o) => o.error?.startsWith(BUDGET_STOP)).length,
     fallback_verdicts: scored.filter((o) => o.verdict!.fallbackUsed).length,
     repeats,
     label_flips_across_repeats: flips,
@@ -98,6 +100,7 @@ export async function calibrate(opts: {
 export function barFailures(summary: Awaited<ReturnType<typeof calibrate>>, minRecall: number, minKappa: number, minPerClass: number): string[] {
   const r = summary.report;
   const reasons: string[] = [];
+  if (summary.budget_stopped_calls) reasons.push("the budget ran out: " + summary.budget_stopped_calls + " judge calls didn't run");
   if (summary.errors) reasons.push(summary.errors + " rows got no verdict (see predictions.jsonl)");
   if (summary.fallback_verdicts) reasons.push(summary.fallback_verdicts + " verdicts came from a fallback model, not this judge");
   for (const [label, n] of Object.entries(summary.split_class_counts)) {
@@ -224,8 +227,13 @@ async function main(): Promise<number> {
   else {
     console.log("Not there yet:");
     for (const reason of reasons) console.log("  - " + reason);
-    if (opts.split === "dev") console.log("Read disagreements.jsonl, change one thing in the rubric (or label more rows), run again.");
-    else console.log("Don't tune on test. Label a fresh batch, calibrate on dev again, and treat the next test read as a re-read: it includes rows you have already seen.");
+    if (summary.budget_stopped_calls) {
+      console.log("The budget ran out before every call ran, so this isn't a verdict on the judge. Raise EVAL_BUDGET_USD and run the same command again.");
+    } else if (opts.split === "dev") {
+      console.log("Read disagreements.jsonl, change one thing in the rubric (or label more rows), run again.");
+    } else {
+      console.log("Don't tune on test. Label a fresh batch, calibrate on dev again, and treat the next test read as a re-read: it includes rows you have already seen.");
+    }
   }
   return reasons.length === 0 ? 0 : 1;
 }

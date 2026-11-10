@@ -13,6 +13,10 @@ from .judge import Judge, JudgeError, Verdict
 Row = dict[str, Any]
 
 
+# The error on a row the budget kept from running. calibrate looks for it.
+BUDGET_STOP = "not run: budget reached"
+
+
 class BudgetExceeded(RuntimeError):
     pass
 
@@ -77,7 +81,7 @@ def judge_rows(judge: Judge, rows: list[Row], workers: int = 4, budget: Budget |
         try:
             budget.check()
         except BudgetExceeded as exc:
-            return Outcome(row, error=f"not run: budget reached ({exc})")
+            return Outcome(row, error=f"{BUDGET_STOP} ({exc})")
         try:
             verdict = judge(row)
         except JudgeError as exc:

@@ -185,6 +185,16 @@ group("pipeline", () => {
     expect(barFailures(summary, 0.9, 0.6, 1).some((r) => r.includes("no verdict"))).toBe(true);
   });
 
+  it("reports a budget stop as a budget stop, across repeats", async () => {
+    const rows = loadJsonl(data("labeled.example.jsonl"), true);
+    const dev = splitRows(rows)[1];
+    const judge = async (row: Row): Promise<Verdict> => ({ label: row.label!, critique: "", model: "fake", fallbackUsed: false, costUsd: 0.01 });
+    const outDir = mkdtempSync(join(tmpdir(), "calib-"));
+    const summary = await calibrate({ rows, judge, config: makeConfig("R"), splitName: "dev", splitRows: dev, outDir, repeats: 2, workers: 1, budget: new Budget(0.045) });
+    expect(summary.budget_stopped_calls).toBe(2 * dev.length - 5);
+    expect(barFailures(summary, 0.9, 0.6, 1)[0]).toMatch(/^the budget ran out: \d+ judge calls didn't run$/);
+  });
+
   it("runs code checks before the judge", async () => {
     const { judge, seen } = fakeJudge({ "o-008": "FAIL" });
     const results = new Map((await scoreRows(loadJsonl(data("outputs.example.jsonl")), judge, 2)).map((r) => [r.id, r]));

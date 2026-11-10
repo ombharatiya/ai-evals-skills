@@ -201,6 +201,25 @@ def test_run_eval_refuses_a_calibration_that_did_not_pass(tmp_path, monkeypatch)
     assert any("passing test read" in h for h in summary["problems"])
 
 
+def test_a_budget_stop_is_reported_as_a_budget_stop(tmp_path, monkeypatch, capsys):
+    import evals.calibrate as calibrate_mod
+
+    rows = load_jsonl(DATA / "labeled.example.jsonl", require_label=True)
+    _, dev, _ = split_rows(rows)
+    summary = calibrate(rows, FakeJudge(), JudgeConfig(rubric="R"), "dev", dev, tmp_path / "a", repeats=2, workers=1,
+                        budget=Budget(limit_usd=0.045))
+    assert summary["budget_stopped_calls"] == 2 * len(dev) - 5
+    assert bar_failures(summary, 0.9, 0.6, 1)[0] == f"the budget ran out: {2 * len(dev) - 5} judge calls didn't run"
+
+    # The advice says to raise the cap, not to label a fresh batch.
+    monkeypatch.setattr(calibrate_mod, "ClaudeJudge", lambda config: FakeJudge())
+    monkeypatch.setenv("EVAL_BUDGET_USD", "0.045")
+    code = calibrate_mod.main(["--data", str(DATA / "labeled.example.jsonl"), "--rubric", str(DATA.parent / "rubrics" / "refund_policy.md"),
+                               "--split", "test", "--out", str(tmp_path / "b")])
+    out = capsys.readouterr().out
+    assert code == 1 and "Raise EVAL_BUDGET_USD and run the same command again." in out and "fresh batch" not in out
+
+
 def test_calibrate_records_whether_it_passed(tmp_path, monkeypatch):
     import evals.calibrate as calibrate_mod
 

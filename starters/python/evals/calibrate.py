@@ -28,7 +28,7 @@ import anthropic
 from .data import class_counts, dumps, file_sha256, load_jsonl, read_text, split_rows, write_jsonl
 from .judge import ClaudeJudge, Judge, JudgeConfig, pick_few_shots, price_known
 from .metrics import judge_report
-from .runner import Budget, judge_rows
+from .runner import BUDGET_STOP, Budget, judge_rows
 
 TRAIN_FRACTION, DEV_FRACTION = 0.15, 0.40
 
@@ -67,6 +67,8 @@ def calibrate(
     runs = [judge_rows(judge, split_rows_, workers=workers, budget=budget) for _ in range(repeats)]
     first = runs[0]
     errors = [o for o in first if o.error]
+    # Calls the budget kept from running, in any repeat: the bar can't be read then.
+    budget_stopped = sum(1 for run in runs for o in run if o.error and o.error.startswith(BUDGET_STOP))
     scored = [o for o in first if o.verdict]
     report = judge_report([o.row["label"] for o in scored], [o.verdict.label for o in scored])
 
@@ -103,6 +105,7 @@ def calibrate(
         "split_class_counts": class_counts(split_rows_),
         "report": asdict(report),
         "errors": len(errors),
+        "budget_stopped_calls": budget_stopped,
         "fallback_verdicts": sum(1 for o in scored if o.verdict.fallback_used),
         "repeats": repeats,
         "label_flips_across_repeats": flips,
@@ -123,6 +126,8 @@ def calibrate(
 def bar_failures(summary: dict, min_recall: float, min_kappa: float, min_per_class: int) -> list[str]:
     r = summary["report"]
     reasons = []
+    if summary.get("budget_stopped_calls"):
+        reasons.append(f"the budget ran out: {summary['budget_stopped_calls']} judge calls didn't run")
     if summary["errors"]:
         reasons.append(f"{summary['errors']} rows got no verdict (see predictions.jsonl)")
     if summary.get("fallback_verdicts"):
@@ -250,7 +255,10 @@ def main(argv: list[str] | None = None) -> int:
         print("Not there yet:")
         for reason in reasons:
             print(f"  - {reason}")
-        if args.split == "dev":
+        if summary["budget_stopped_calls"]:
+            print("The budget ran out before every call ran, so this isn't a verdict on the judge. "
+                  "Raise EVAL_BUDGET_USD and run the same command again.")
+        elif args.split == "dev":
             print("Read disagreements.jsonl, change one thing in the rubric (or label more rows), run again.")
         else:
             print("Don't tune on test. Label a fresh batch, calibrate on dev again, and treat the next test read as a re-read: it includes rows you have already seen.")

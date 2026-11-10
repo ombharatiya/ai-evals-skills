@@ -8,6 +8,9 @@ import { JudgeError, type Judge, type Verdict } from "./judge.js";
  * Failed calls (refusals, truncations, bad output) are charged too. Calls in
  * flight finish, so spend can overshoot by one call per worker.
  */
+/** The error on a row the budget kept from running. calibrate looks for it. */
+export const BUDGET_STOP = "not run: budget reached";
+
 export class Budget {
   spentUsd = 0;
   constructor(readonly limitUsd: number | null = null) {}
@@ -47,7 +50,7 @@ export async function judgeRows(judge: Judge, rows: Row[], workers = 4, budget =
       const i = next++;
       const row = rows[i]!;
       if (budget.exceeded) {
-        outcomes[i] = { row, error: "not run: budget reached (spent " + budget.spentUsd.toFixed(2) + " USD)" };
+        outcomes[i] = { row, error: BUDGET_STOP + " (spent " + budget.spentUsd.toFixed(2) + " USD)" };
         continue;
       }
       try {
