@@ -186,7 +186,7 @@ own working number, not a published standard.
 | First error-analysis pass | 100+ traces, first failure only (Hamel and Shankar FAQ); 15 to 45 seconds each | FAQ, and aievals.co for the pace |
 | Failure-mode categories | 4 to 7 after axial coding | aievals.co open-coding guide |
 | Labels per failure mode | 100 to 200 | Hamel and Shankar FAQ |
-| Split | 15% train, 40% dev, 45% test, stratified; a row never changes split as labels are added | aievals.co calibration recipe |
+| Split | 15% train, 40% dev, 45% test; each split keeps the PASS:FAIL ratio, and a row never changes split as labels are added | aievals.co calibration recipe |
 | Per class in dev and in test | 30 to 50 PASS and 30 to 50 FAIL | Hamel and Shankar FAQ |
 | Judge recall bar | PASS and FAIL recall at least 0.90 on dev, confirmed on test | site default |
 | Human agreement before automating | kappa at least 0.6 to proceed, 0.8 for a gold set or gate | team policy, per the guide |

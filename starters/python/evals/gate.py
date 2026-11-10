@@ -81,6 +81,37 @@ def paired_delta(baseline: dict[str, bool], candidate: dict[str, bool]) -> Delta
                  both_pass=a, baseline_only=b, candidate_only=c, both_fail=d)
 
 
+def no_change_halfwidth(n: int, rate: float) -> float:
+    """How wide the interval is when a candidate matches the baseline on every row.
+
+    This is the gate set's resolution: a ship needs the whole interval inside
+    the indifference window, so a window narrower than this can never ship an
+    unchanged candidate.
+    """
+    passes = int(rate * n + 0.5)  # round half up, as the TypeScript starter does
+    _, lo, hi = newcombe_paired(passes, 0, 0, n - passes)
+    return max(-lo, hi)
+
+
+def rows_for_indifference(rate: float, indifference: float, start: int = 1, limit: int = 1_000_000) -> int | None:
+    """Smallest gate-set size whose no-change interval fits inside the window."""
+    n = max(1, start)
+    if no_change_halfwidth(n, rate) <= indifference:
+        return n
+    lo = n
+    while no_change_halfwidth(n, rate) > indifference:
+        lo, n = n, n * 2
+        if n > limit:
+            return None
+    while lo + 1 < n:
+        mid = (lo + n) // 2
+        if no_change_halfwidth(mid, rate) <= indifference:
+            n = mid
+        else:
+            lo = mid
+    return n
+
+
 def band(delta: Delta, indifference: float = 0.01, minor_regression: float = 0.02) -> str:
     """The guide's gate(): decide a band from the delta and its interval."""
     lo, hi = delta.ci

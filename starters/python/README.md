@@ -114,6 +114,12 @@ Some conditions override the band:
 `results.jsonl` is written as soon as scoring finishes, and every input file is checked
 before the first judge call.
 
+Size the indifference window to your gate set. Every run prints the set's resolution: how
+wide the interval is for a candidate that matches the baseline on every row. At a 76% pass
+rate that's about plus or minus 5.3 points with 50 rows, so a 1-point window would hold
+every unchanged candidate; the 1-point default needs about 280 rows. Grow the set, or pass
+`--indifference` at least as wide as the printed resolution.
+
 ## Pinning and cost
 
 - The judge defaults to `claude-opus-5-5` at effort `medium`. Change them with `--model`

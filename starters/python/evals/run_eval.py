@@ -34,7 +34,7 @@ import anthropic
 
 from .checks import run_checks
 from .data import dumps, file_sha256, load_jsonl, split_rows, write_jsonl
-from .gate import band, paired_delta
+from .gate import band, no_change_halfwidth, paired_delta, rows_for_indifference
 from .judge import ClaudeJudge, Judge, JudgeConfig, pick_few_shots, price_known
 from .metrics import wilson
 from .runner import Budget, judge_rows
@@ -254,6 +254,21 @@ def main(argv: list[str] | None = None) -> int:
             "paired_counts": {"both_pass": d.both_pass, "baseline_only": d.baseline_only,
                               "candidate_only": d.candidate_only, "both_fail": d.both_fail},
         }
+    # The gate set's resolution: how wide the interval is for an unchanged
+    # candidate, and how many rows the indifference window needs.
+    res_n, res_rate = (summary["vs_baseline"]["n"], summary["vs_baseline"]["baseline_rate"]) if "vs_baseline" in summary else (len(known), rate)
+    notes: list[str] = []
+    if res_n and res_rate == res_rate:
+        half = no_change_halfwidth(res_n, res_rate)
+        needed = rows_for_indifference(res_rate, args.indifference, start=res_n)
+        summary["resolution"] = {"n": res_n, "no_change_halfwidth": half, "rows_for_indifference": needed}
+        if half > args.indifference:
+            notes.append(
+                f"with {res_n} rows at this pass rate, an unchanged candidate's interval is about +-{half:.3f}, wider than "
+                f"the {args.indifference:.3f} indifference window, so no candidate can ship by staying the same. "
+                f"Grow the gate set to about {needed} rows" + (f", or pass --indifference {half:.3f} or more" if needed else "")
+            )
+    summary["notes"] = notes
     if must_fail:
         verdict = "block"
     elif holds and verdict in ("ship", "baseline"):
@@ -276,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  regression set failures: {', '.join(must_fail)}")
     for reason in holds:
         print(f"  hold: {reason}")
+    for note in notes:
+        print(f"  note: {note}")
     print(f"  estimated cost ${summary['estimated_cost_usd']:.2f}")
     print(f"verdict: {verdict.upper()}   wrote {out_dir}")
     return 0 if verdict in ("ship", "baseline") else 1

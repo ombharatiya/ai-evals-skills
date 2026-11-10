@@ -83,6 +83,35 @@ export function pairedDelta(baseline: Map<string, boolean>, candidate: Map<strin
   };
 }
 
+/**
+ * How wide the interval is when a candidate matches the baseline on every
+ * row: the gate set's resolution. A window narrower than this can never ship
+ * an unchanged candidate.
+ */
+export function noChangeHalfwidth(n: number, rate: number): number {
+  const passes = Math.round(rate * n);
+  const [, lo, hi] = newcombePaired(passes, 0, 0, n - passes);
+  return Math.max(-lo, hi);
+}
+
+/** Smallest gate-set size whose no-change interval fits inside the window. */
+export function rowsForIndifference(rate: number, indifference: number, start = 1, limit = 1_000_000): number | null {
+  let n = Math.max(1, start);
+  if (noChangeHalfwidth(n, rate) <= indifference) return n;
+  let lo = n;
+  while (noChangeHalfwidth(n, rate) > indifference) {
+    lo = n;
+    n *= 2;
+    if (n > limit) return null;
+  }
+  while (lo + 1 < n) {
+    const mid = Math.floor((lo + n) / 2);
+    if (noChangeHalfwidth(mid, rate) <= indifference) n = mid;
+    else lo = mid;
+  }
+  return n;
+}
+
 export type Band = "ship" | "hold" | "investigate" | "block";
 
 /** The guide's gate(): decide a band from the delta and its interval. */

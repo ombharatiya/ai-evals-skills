@@ -38,3 +38,13 @@ def test_paired_delta_uses_only_shared_ids():
     cand = {"a": True, "b": True, "c": False}
     r = paired_delta(base, cand)
     assert r.n == 2 and r.candidate_only == 1
+
+
+def test_resolution_says_how_many_rows_a_window_needs():
+    from evals.gate import no_change_halfwidth, rows_for_indifference
+
+    # The site review's numbers: at a 76% pass rate, 50 identical rows give about +-5.3 points.
+    assert round(no_change_halfwidth(50, 0.76), 4) == 0.0529
+    assert rows_for_indifference(0.76, 0.01) == 278
+    assert rows_for_indifference(0.97, 0.01) == 408
+    assert no_change_halfwidth(278, 0.76) <= 0.01 < no_change_halfwidth(277, 0.76)

@@ -23,7 +23,7 @@ import { parseArgs } from "node:util";
 import { runChecks } from "./checks.js";
 import { isMain, numberFlag } from "./cli.js";
 import { dumps, fileSha256, loadJsonl, splitRows, writeJsonl, type Row } from "./data.js";
-import { band, pairedDelta, type Band } from "./gate.js";
+import { band, noChangeHalfwidth, pairedDelta, rowsForIndifference, type Band } from "./gate.js";
 import { EFFORTS, claudeJudge, describe, makeConfig, pickFewShots, priceKnown, setupProblem, type Effort, type Judge } from "./judge.js";
 import { wilson } from "./metrics.js";
 import { Budget, judgeRows } from "./runner.js";
@@ -257,6 +257,25 @@ async function main(): Promise<number> {
       paired_counts: { both_pass: d.both_pass, baseline_only: d.baseline_only, candidate_only: d.candidate_only, both_fail: d.both_fail },
     };
   }
+  // The gate set's resolution: how wide the interval is for an unchanged
+  // candidate, and how many rows the indifference window needs.
+  const vsBase = summary.vs_baseline as { n: number; baseline_rate: number } | undefined;
+  const resN = vsBase ? vsBase.n : known.length;
+  const resRate = vsBase ? vsBase.baseline_rate : rate;
+  const notes: string[] = [];
+  if (resN > 0 && Number.isFinite(resRate)) {
+    const half = noChangeHalfwidth(resN, resRate);
+    const needed = rowsForIndifference(resRate, setup.indifference, resN);
+    summary.resolution = { n: resN, no_change_halfwidth: half, rows_for_indifference: needed };
+    if (half > setup.indifference) {
+      notes.push(
+        "with " + resN + " rows at this pass rate, an unchanged candidate's interval is about +-" + half.toFixed(3) +
+          ", wider than the " + setup.indifference.toFixed(3) + " indifference window, so no candidate can ship by staying the same. " +
+          "Grow the gate set to about " + needed + " rows" + (needed ? ", or pass --indifference " + half.toFixed(3) + " or more" : ""),
+      );
+    }
+  }
+  summary.notes = notes;
   if (mustFail.length) verdict = "block";
   else if (holds.length && (verdict === "ship" || verdict === "baseline")) verdict = "hold";
   summary.verdict = verdict;
@@ -274,6 +293,7 @@ async function main(): Promise<number> {
   }
   if (mustFail.length) console.log("  regression set failures: " + mustFail.join(", "));
   for (const reason of holds) console.log("  hold: " + reason);
+  for (const note of notes) console.log("  note: " + note);
   console.log("  estimated cost $" + (summary.estimated_cost_usd as number).toFixed(2));
   console.log("verdict: " + verdict.toUpperCase() + "   wrote " + outDir);
   return verdict === "ship" || verdict === "baseline" ? 0 : 1;

@@ -5,7 +5,7 @@ import { describe as group, expect, it } from "vitest";
 import { runChecks } from "../src/checks.js";
 import { numberFlag } from "../src/cli.js";
 import { classCounts, dumps, loadJsonl, splitRows, type Row } from "../src/data.js";
-import { band, newcombePaired, pairedDelta, type Delta } from "../src/gate.js";
+import { band, newcombePaired, noChangeHalfwidth, pairedDelta, rowsForIndifference, type Delta } from "../src/gate.js";
 
 const rows = (nPass: number, nFail: number, prefix = ""): Row[] => [
   ...Array.from({ length: nPass }, (_, i) => ({ id: prefix + "p" + i, query: "q", response: "r", label: "PASS" as const })),
@@ -104,6 +104,12 @@ group("gate", () => {
     const [, lo, hi] = newcombePaired(160, 40, 0, 0);
     expect(lo).toBeCloseTo(-0.2608563961117042, 12);
     expect(hi).toBeCloseTo(-0.14698816374338808, 12);
+  });
+
+  it("reports the gate set's resolution like the Python starter", () => {
+    expect(noChangeHalfwidth(50, 0.76)).toBeCloseTo(0.0529, 3);
+    expect(rowsForIndifference(0.76, 0.01)).toBe(278);
+    expect(rowsForIndifference(0.97, 0.01)).toBe(408);
   });
 
   it("detects a clear paired regression", () => {
