@@ -91,11 +91,10 @@ def no_change_halfwidth(n: int, rate: float, flip_rate: float = 0.0) -> float:
     which widens the interval. With flip_rate=0 (a perfectly repeatable
     judge) the result is a floor.
     """
-    passes = int(rate * n + 0.5)  # round half up, as the TypeScript starter does
-    # The expected number of flips, not rounded to whole rows: rounding makes the
-    # width jump up and down as n grows, and rows_for_indifference needs it to shrink.
-    half_flips = flip_rate * n / 2
-    b = c = min(half_flips, passes, n - passes)
+    # Expected counts, not rounded to whole rows: rounding makes the width jump up
+    # and down as n grows, and rows_for_indifference needs it to shrink.
+    passes = rate * n
+    b = c = min(flip_rate * n / 2, passes, n - passes)
     _, lo, hi = newcombe_paired(passes - b, b, c, n - passes - c)
     return max(-lo, hi)
 

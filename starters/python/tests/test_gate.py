@@ -45,9 +45,9 @@ def test_resolution_says_how_many_rows_a_window_needs():
 
     # The site review's numbers: at a 76% pass rate, 50 identical rows give about +-5.3 points.
     assert round(no_change_halfwidth(50, 0.76), 4) == 0.0529
-    assert rows_for_indifference(0.76, 0.01) == 278
+    assert rows_for_indifference(0.76, 0.01) == 277
     assert rows_for_indifference(0.97, 0.01) == 408
-    assert no_change_halfwidth(278, 0.76) <= 0.01 < no_change_halfwidth(277, 0.76)
+    assert no_change_halfwidth(277, 0.76) <= 0.01 < no_change_halfwidth(276, 0.76)
 
 
 def test_resolution_accounts_for_judge_flips():
@@ -59,3 +59,9 @@ def test_resolution_accounts_for_judge_flips():
     from evals.gate import no_change_halfwidth
     assert no_change_halfwidth(855, 0.76, 0.02) > 0.01
     assert all(no_change_halfwidth(n, 0.76, 0.02) <= 0.01 for n in range(856, 1300))
+    # The review's high-pass-rate cases, where flips are capped by the FAIL rows.
+    assert rows_for_indifference(0.99, 0.01, flip_rate=0.1) is not None
+    for rate, flip in ((0.99, 0.03), (0.99, 0.1), (0.97, 0.1)):
+        n = rows_for_indifference(rate, 0.01, flip_rate=flip)
+        assert no_change_halfwidth(n - 1, rate, flip) > 0.01
+        assert all(no_change_halfwidth(m, rate, flip) <= 0.01 for m in range(n, n + 400))

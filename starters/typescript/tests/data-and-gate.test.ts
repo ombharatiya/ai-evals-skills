@@ -22,6 +22,14 @@ group("data", () => {
     expect(loadJsonl(join(dir, "w.jsonl"))).toEqual([{ id: "a", query: "q", response: "r" }]);
   });
 
+  it("quotes a duplicate id in the error, so it can't emit a workflow command", () => {
+    const dir = mkdtempSync(join(tmpdir(), "evals-"));
+    const file = join(dir, "dup.jsonl");
+    const row = JSON.stringify({ id: "g\n::warning::x", query: "q", response: "r" }) + "\n";
+    writeFileSync(file, row + row);
+    expect(() => loadJsonl(file)).toThrow(/: duplicate id "g\\n::warning::x"$/);
+  });
+
   it("rejects bad rows", () => {
     const dir = mkdtempSync(join(tmpdir(), "evals-"));
     const file = join(dir, "bad.jsonl");
@@ -117,8 +125,14 @@ group("gate", () => {
 
   it("reports the gate set's resolution like the Python starter", () => {
     expect(noChangeHalfwidth(50, 0.76)).toBeCloseTo(0.0529, 3);
-    expect(rowsForIndifference(0.76, 0.01)).toBe(278);
+    expect(rowsForIndifference(0.76, 0.01)).toBe(277);
     expect(rowsForIndifference(0.97, 0.01)).toBe(408);
+    // The review's high-pass-rate cases, where flips are capped by the FAIL rows.
+    for (const [rate, flip] of [[0.99, 0.03], [0.99, 0.1], [0.97, 0.1]] as const) {
+      const n = rowsForIndifference(rate, 0.01, 1, 1_000_000, flip)!;
+      expect(noChangeHalfwidth(n - 1, rate, flip)).toBeGreaterThan(0.01);
+      for (let m = n; m < n + 400; m++) expect(noChangeHalfwidth(m, rate, flip)).toBeLessThanOrEqual(0.01);
+    }
   });
 
   it("detects a clear paired regression", () => {

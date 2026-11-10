@@ -62,7 +62,7 @@ investigation.
   power: a window narrower than the set can resolve makes every unchanged candidate hold.
   With Newcombe's paired interval at a 76% pass rate, an unchanged candidate's interval is
   at least plus or minus 5.3 points at 50 rows, 2.7 at 100 and 1.4 at 200, and a 1-point
-  window needs at least 280 rows (360 at a 90% pass rate, 410 at 97%). Those are floors
+  window needs about 280 rows (360 at a 90% pass rate, 410 at 97%). Those are floors
   for a judge that never flips a label. A judge that flips 2% of its labels between
   identical runs needs about 860 rows for the same window at 76%, and one that flips 5%
   about 1,960. The starters print this resolution on every run, using the flip rate from a

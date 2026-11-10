@@ -71,7 +71,8 @@ export function loadJsonl(path: string, requireLabel = false): Row[] {
     for (const field of ["id", "query", "response"] as const) {
       if (typeof row[field] !== "string") throw new Error(where + ": '" + field + "' must be a string");
     }
-    if (seen.has(row.id)) throw new Error(where + ": duplicate id " + row.id);
+    // JSON-quoted, so an id can't start an output line of its own.
+    if (seen.has(row.id)) throw new Error(where + ": duplicate id " + JSON.stringify(row.id));
     seen.add(row.id);
     if (row.label !== undefined && row.label !== null) {
       const label = String(row.label).toUpperCase();

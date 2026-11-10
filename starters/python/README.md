@@ -121,7 +121,7 @@ before the first judge call.
 Size the indifference window to your gate set. Every run prints the set's resolution: how
 wide the interval is for a candidate that matches the baseline on every row. At a 76% pass
 rate that's about plus or minus 5.3 points with 50 rows, so a 1-point window would hold
-every unchanged candidate; the 1-point default needs at least 280 rows. That's a floor for a
+every unchanged candidate; the 1-point default needs about 280 rows. That's a floor for a
 judge that never flips a label: with 2% flips between identical runs it's about 860 rows.
 Calibrate with `--repeats 2` and pass that record with `--calibration`, and the resolution
 uses the measured flip rate.

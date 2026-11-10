@@ -91,11 +91,10 @@ export function pairedDelta(baseline: Map<string, boolean>, candidate: Map<strin
 export function noChangeHalfwidth(n: number, rate: number, flipRate = 0): number {
   // A judge that flips a share of its labels between identical runs adds that
   // many disagreeing pairs, split both ways. flipRate = 0 gives a floor.
-  const passes = Math.floor(rate * n + 0.5);
-  // The expected number of flips, not rounded to whole rows: rounding makes the
-  // width jump up and down as n grows, and rowsForIndifference needs it to shrink.
-  const halfFlips = (flipRate * n) / 2;
-  const b = Math.min(halfFlips, passes, n - passes);
+  // Expected counts, not rounded to whole rows: rounding makes the width jump up
+  // and down as n grows, and rowsForIndifference needs it to shrink.
+  const passes = rate * n;
+  const b = Math.min((flipRate * n) / 2, passes, n - passes);
   const [, lo, hi] = newcombePaired(passes - b, b, b, n - passes - b);
   return Math.max(-lo, hi);
 }
