@@ -13,7 +13,7 @@
  */
 import { createHash } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
-import type { Label, Row } from "./data.js";
+import { trimSpace, type Label, type Row } from "./data.js";
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -140,7 +140,8 @@ export function pickFewShots(train: Row[], n = 4): Row[] {
 }
 
 export function renderSystem(config: JudgeConfig): string {
-  const parts = [SYSTEM_PREAMBLE, "<rubric>\n" + config.rubric.trim() + "\n</rubric>"];
+  // Trim only ASCII whitespace: JavaScript's trim() and Python's strip() disagree on the rest.
+  const parts = [SYSTEM_PREAMBLE, "<rubric>\n" + trimSpace(config.rubric) + "\n</rubric>"];
   if (config.fewShots.length > 0) {
     const shots = config.fewShots.map((r) => {
       let shot = "<query>" + r.query + "</query>\n<response>" + r.response + "</response>\n";

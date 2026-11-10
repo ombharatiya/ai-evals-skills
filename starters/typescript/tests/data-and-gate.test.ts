@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe as group, expect, it } from "vitest";
 import { runChecks } from "../src/checks.js";
 import { numberFlag } from "../src/cli.js";
-import { classCounts, dumps, loadJsonl, splitRows, type Row } from "../src/data.js";
+import { classCounts, dumps, loadJsonl, splitRows, writeJsonl, type Row } from "../src/data.js";
 import { band, newcombePaired, noChangeHalfwidth, pairedDelta, rowsForIndifference, type Delta } from "../src/gate.js";
 
 const rows = (nPass: number, nFail: number, prefix = ""): Row[] => [
@@ -13,6 +13,15 @@ const rows = (nPass: number, nFail: number, prefix = ""): Row[] => [
 ];
 
 group("data", () => {
+  it("keeps Unicode line separators and reads files saved on Windows", () => {
+    const dir = mkdtempSync(join(tmpdir(), "evals-"));
+    const row = { id: "a", query: "q", response: "line one\u2028line two\u0085three" };
+    writeJsonl(join(dir, "x.jsonl"), [row]);
+    expect(loadJsonl(join(dir, "x.jsonl"))).toEqual([row]);
+    writeFileSync(join(dir, "w.jsonl"), '\ufeff{"id": "a", "query": "q", "response": "r"}\r\n\r\n');
+    expect(loadJsonl(join(dir, "w.jsonl"))).toEqual([{ id: "a", query: "q", response: "r" }]);
+  });
+
   it("rejects bad rows", () => {
     const dir = mkdtempSync(join(tmpdir(), "evals-"));
     const file = join(dir, "bad.jsonl");

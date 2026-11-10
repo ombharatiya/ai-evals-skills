@@ -78,7 +78,7 @@ Pass the same `--labeled`, `--seed` and `--few-shots` you calibrated with.
 
 Every run prints the gate set's resolution: how wide the interval is for a candidate that
 matches the baseline on every row. At a 76% pass rate that's about plus or minus 5.3 points
-with 50 rows, so the 1-point default window needs at least 280 rows, and about 830 if the
+with 50 rows, so the 1-point default window needs at least 280 rows, and about 860 if the
 judge flips 2% of its labels between identical runs. With a `--repeats 2` calibration record
 passed as `--calibration`, the resolution uses the measured flip rate.
 

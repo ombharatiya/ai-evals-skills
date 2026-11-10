@@ -88,6 +88,21 @@ def test_fingerprint_matches_the_typescript_starter():
     )
 
 
+def test_a_windows_rubric_fingerprints_the_same_as_the_typescript_starter(tmp_path):
+    # A byte-order mark and CRLF endings are dropped on read in both languages;
+    # the TypeScript test pins the same values.
+    from evals.data import read_text
+
+    path = tmp_path / "rubric.md"
+    path.write_bytes(b"\xef\xbb\xbfR\r\n")
+    rubric = read_text(path)
+    assert rubric == "R\n"
+    shot = {"id": "f1", "query": "q", "response": "r", "label": "FAIL", "critique": "naïve x"}
+    described = JudgeConfig(rubric=rubric, few_shots=[shot]).describe()
+    assert described["prompt_sha256"] == "7837062c1b9d6ee52eb994de04b29ecc8a25eb5ab6e1e8e902e4cc12fdac4189"
+    assert described["rubric_sha256"] == "13b30eab8afdfab285103004686b2e6140ce53aa45a4f917341c740dfdb6e956"
+
+
 def test_without_an_iteration_breakdown_the_served_model_is_priced():
     usage = SimpleNamespace(input_tokens=1000, output_tokens=400, cache_creation_input_tokens=0,
                             cache_read_input_tokens=0, iterations=None)

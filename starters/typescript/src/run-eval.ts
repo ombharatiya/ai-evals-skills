@@ -23,12 +23,12 @@
  *   test read, rows with no verdict, rows missing on either side, fewer than
  *   --min-paired paired rows, or verdicts from a fallback model
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { runChecks } from "./checks.js";
 import { isMain, numberFlag } from "./cli.js";
-import { dumps, fileSha256, loadJsonl, splitRows, writeJsonl, type Row } from "./data.js";
+import { dumps, fileSha256, jsonlLines, loadJsonl, readText, splitRows, writeJsonl, type Row } from "./data.js";
 import { band, noChangeHalfwidth, pairedDelta, rowsForIndifference, type Band } from "./gate.js";
 import { EFFORTS, claudeJudge, describe, makeConfig, pickFewShots, priceKnown, setupProblem, type Effort, type Judge } from "./judge.js";
 import { wilson } from "./metrics.js";
@@ -105,28 +105,37 @@ export function correctedPassRate(results: RowResult[], passRecall?: number | nu
   return corrected === null ? null : (corrected * judged.length) / known.length;
 }
 
-/** The baseline's pass/fail per id, and the ids it marks must_pass. */
-export function readBaseline(path: string): { base: Map<string, boolean>; mustPass: Set<string> } {
+/** The baseline's pass/fail per scored id, the ids it marks must_pass, and every id in it. */
+export function readBaseline(path: string): { base: Map<string, boolean>; mustPass: Set<string>; ids: Set<string> } {
   const base = new Map<string, boolean>();
   const mustPass = new Set<string>();
-  readFileSync(path, "utf8")
-    .split("\n")
-    .forEach((line, index) => {
-      if (!line.trim()) return;
-      let row: Partial<RowResult>;
-      try {
-        row = JSON.parse(line) as Partial<RowResult>;
-      } catch {
-        throw new Error(path + ":" + (index + 1) + ": not valid JSON; --baseline takes a results.jsonl from an earlier run");
-      }
-      if (!row || typeof row !== "object" || typeof row.id !== "string" || !("passed" in row)) {
-        throw new Error(path + ":" + (index + 1) + ": missing 'id' or 'passed'; --baseline takes a results.jsonl from an earlier run");
-      }
-      if (row.passed !== null && row.passed !== undefined) base.set(row.id, Boolean(row.passed));
-      if (row.must_pass) mustPass.add(row.id);
-    });
+  const ids = new Set<string>();
+  for (const [lineno, line] of jsonlLines(path)) {
+    let row: Partial<RowResult>;
+    try {
+      row = JSON.parse(line) as Partial<RowResult>;
+    } catch {
+      throw new Error(path + ":" + lineno + ": not valid JSON; --baseline takes a results.jsonl from an earlier run");
+    }
+    if (!row || typeof row !== "object" || typeof row.id !== "string" || !("passed" in row)) {
+      throw new Error(path + ":" + lineno + ": missing 'id' or 'passed'; --baseline takes a results.jsonl from an earlier run");
+    }
+    ids.add(row.id);
+    if (row.passed !== null && row.passed !== undefined) base.set(row.id, Boolean(row.passed));
+    if (row.must_pass) mustPass.add(row.id);
+  }
   if (base.size === 0) throw new Error(path + ": no scored rows");
-  return { base, mustPass };
+  return { base, mustPass, ids };
+}
+
+/**
+ * Ids for a message, with line breaks escaped so an id can't start an output
+ * line of its own (on GitHub Actions a line that starts with :: is a command).
+ */
+export function showIds(ids: string[], limit: number | null = 10): string {
+  const shown = limit === null ? ids : ids.slice(0, limit);
+  const text = shown.map((i) => i.replace(/\r/g, "\\r").replace(/\n/g, "\\n")).join(", ");
+  return text + (limit !== null && ids.length > limit ? ", ..." : "");
 }
 
 /** Escape a GitHub Actions annotation message (ids come from your data). */
@@ -145,7 +154,7 @@ interface CalibrationRecord {
 function readCalibration(path: string): CalibrationRecord {
   let data: CalibrationRecord;
   try {
-    data = JSON.parse(readFileSync(path, "utf8"));
+    data = JSON.parse(readText(path));
   } catch {
     throw new Error(path + ": not valid JSON; --calibration takes a calibrate summary.json");
   }
@@ -200,7 +209,7 @@ async function main(): Promise<number> {
       rows: loadJsonl(values.data),
       baseline: values.baseline ? readBaseline(values.baseline) : null,
       calibration: values.calibration ? readCalibration(values.calibration) : null,
-      rubric: readFileSync(values.rubric, "utf8"),
+      rubric: readText(values.rubric),
       labeled: values.labeled ? loadJsonl(values.labeled, true) : null,
     };
   } catch (err) {
@@ -282,13 +291,15 @@ async function main(): Promise<number> {
   // Without a baseline there is nothing to compare: this run becomes the baseline.
   let verdict: Band | "baseline" | "invalid" = "baseline";
   if (setup.baseline) {
-    const { base, mustPass } = setup.baseline;
+    const { base, mustPass, ids: baseIds } = setup.baseline;
     const cand = new Map(known.map((r) => [r.id, r.passed as boolean]));
     const unpaired = [...cand.keys()].filter((id) => !base.has(id)).sort();
-    if (unpaired.length) problems.push(unpaired.length + " ids aren't in the baseline and weren't compared: " + unpaired.slice(0, 10).join(", "));
+    if (unpaired.length) problems.push(unpaired.length + " ids have no scored row in the baseline and weren't compared: " + showIds(unpaired));
+    // Every baseline id counts here, scored or not, so a regression row that had
+    // no verdict in the baseline still blocks when this run drops it.
     const produced = new Set(results.map((r) => r.id));
-    const absent = [...base.keys()].filter((id) => !produced.has(id)).sort();
-    if (absent.length) problems.push(absent.length + " baseline ids are missing from this run: " + absent.slice(0, 10).join(", "));
+    const absent = [...baseIds].filter((id) => !produced.has(id)).sort();
+    if (absent.length) problems.push(absent.length + " baseline ids are missing from this run: " + showIds(absent));
     const absentMust = absent.filter((id) => mustPass.has(id));
     if (absentMust.length) {
       // A regression row the candidate didn't produce can't count as passing.
@@ -353,7 +364,7 @@ async function main(): Promise<number> {
   if (vs) {
     console.log("  vs baseline: " + vs.baseline_rate.toFixed(3) + " -> " + vs.candidate_rate.toFixed(3) + "  delta " + sign(vs.delta) + "  95% CI [" + sign(vs.ci[0]) + ", " + sign(vs.ci[1]) + "]  n=" + vs.n + "  band=" + vs.band);
   }
-  if (mustFail.length) console.log("  regression set failures: " + mustFail.join(", "));
+  if (mustFail.length) console.log("  regression set failures: " + showIds(mustFail, null));
   for (const reason of problems) console.log("  problem: " + reason);
   for (const note of notes) console.log("  note: " + note);
   console.log("  estimated cost $" + (summary.estimated_cost_usd as number).toFixed(2));
@@ -362,7 +373,7 @@ async function main(): Promise<number> {
   if (process.env.GITHUB_ACTIONS === "true" && verdict !== "ship" && verdict !== "baseline") {
     // Show the verdict on the pull request even when it doesn't fail the job.
     const details = [...problems];
-    if (mustFail.length) details.push("regression rows failed: " + mustFail.join(", "));
+    if (mustFail.length) details.push("regression rows failed: " + showIds(mustFail, null));
     if (vs) details.push("delta " + sign(vs.delta) + ", 95% CI [" + sign(vs.ci[0]) + ", " + sign(vs.ci[1]) + "], n=" + vs.n);
     details.push("read the rows in results.jsonl (the eval-run artifact in CI)");
     console.log("::" + (failed ? "error" : "warning") + " title=Release gate " + verdict.toUpperCase() + "::" + annotationText(details.join("; ")));

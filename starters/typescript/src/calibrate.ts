@@ -13,11 +13,11 @@
  * --min-per-class rows, PASS and FAIL recall reach --min-recall, and kappa
  * reaches --min-kappa.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { isMain, numberFlag } from "./cli.js";
-import { classCounts, dumps, fileSha256, loadJsonl, splitRows, writeJsonl, type Label, type Row } from "./data.js";
+import { classCounts, dumps, fileSha256, loadJsonl, readText, splitRows, writeJsonl, type Label, type Row } from "./data.js";
 import { EFFORTS, claudeJudge, describe, makeConfig, pickFewShots, priceKnown, setupProblem, type Effort, type Judge, type JudgeConfig } from "./judge.js";
 import { judgeReport } from "./metrics.js";
 import { Budget, judgeRows } from "./runner.js";
@@ -156,7 +156,7 @@ async function main(): Promise<number> {
       minPerClass: numberFlag("min-per-class", values["min-per-class"], { integer: true, min: 0 }),
       budget: Budget.fromEnv(),
       rows: loadJsonl(values.data, true),
-      rubric: readFileSync(values.rubric, "utf8"),
+      rubric: readText(values.rubric),
     };
   } catch (err) {
     console.error((err as Error).message);

@@ -39,7 +39,7 @@ from pathlib import Path
 import anthropic
 
 from .checks import run_checks
-from .data import dumps, file_sha256, load_jsonl, split_rows, write_jsonl
+from .data import dumps, file_sha256, jsonl_lines, load_jsonl, read_text, split_rows, write_jsonl
 from .gate import band, no_change_halfwidth, paired_delta, rows_for_indifference
 from .judge import ClaudeJudge, Judge, JudgeConfig, pick_few_shots, price_known
 from .metrics import wilson
@@ -117,26 +117,34 @@ def corrected_pass_rate(results: list[dict], pass_recall: float | None, fail_rec
     return corrected * len(judged) / len(known)
 
 
-def read_baseline(path: str) -> tuple[dict[str, bool], set[str]]:
-    """The baseline's pass/fail per id, and the ids it marks must_pass."""
+def read_baseline(path: str) -> tuple[dict[str, bool], set[str], set[str]]:
+    """The baseline's pass/fail per scored id, the ids it marks must_pass, and every id in it."""
     base: dict[str, bool] = {}
     must_pass: set[str] = set()
-    for lineno, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
+    ids: set[str] = set()
+    for lineno, line in jsonl_lines(path):
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
             raise ValueError(f"{path}:{lineno}: not valid JSON; --baseline takes a results.jsonl from an earlier run") from exc
-        if not isinstance(row, dict) or "id" not in row or "passed" not in row:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or "passed" not in row:
             raise ValueError(f"{path}:{lineno}: missing 'id' or 'passed'; --baseline takes a results.jsonl from an earlier run")
+        ids.add(row["id"])
         if row["passed"] is not None:
             base[row["id"]] = bool(row["passed"])
         if row.get("must_pass"):
             must_pass.add(row["id"])
     if not base:
         raise ValueError(f"{path}: no scored rows")
-    return base, must_pass
+    return base, must_pass, ids
+
+
+def show_ids(ids: list[str], limit: int | None = 10) -> str:
+    """Ids for a message, with line breaks escaped so an id can't start an output
+    line of its own (on GitHub Actions a line that starts with :: is a command)."""
+    shown = ids if limit is None else ids[:limit]
+    text = ", ".join(i.replace("\r", "\\r").replace("\n", "\\n") for i in shown)
+    return text + (", ..." if limit is not None and len(ids) > limit else "")
 
 
 def annotation_text(text: str) -> str:
@@ -146,7 +154,7 @@ def annotation_text(text: str) -> str:
 
 def read_calibration(path: str) -> dict:
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(read_text(path))
     except json.JSONDecodeError as exc:
         raise ValueError(f"{path}: not valid JSON; --calibration takes a calibrate summary.json") from exc
     if not isinstance(data, dict) or "judge" not in data or "report" not in data:
@@ -182,9 +190,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         budget = Budget.from_env()
         rows = load_jsonl(args.data)
-        base, base_must_pass = read_baseline(args.baseline) if args.baseline else (None, set())
+        base, base_must_pass, base_ids = read_baseline(args.baseline) if args.baseline else (None, set(), set())
         calibration = read_calibration(args.calibration) if args.calibration else None
-        rubric = Path(args.rubric).read_text(encoding="utf-8")
+        rubric = read_text(args.rubric)
         labeled = load_jsonl(args.labeled, require_label=True) if args.labeled else None
     except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)
@@ -273,10 +281,12 @@ def main(argv: list[str] | None = None) -> int:
         cand = {r["id"]: bool(r["passed"]) for r in known}
         unpaired = sorted(set(cand) - set(base))
         if unpaired:
-            problems.append(f"{len(unpaired)} ids aren't in the baseline and weren't compared: {', '.join(unpaired[:10])}")
-        absent = sorted(set(base) - {r["id"] for r in results})
+            problems.append(f"{len(unpaired)} ids have no scored row in the baseline and weren't compared: {show_ids(unpaired)}")
+        # Every baseline id counts here, scored or not, so a regression row that had
+        # no verdict in the baseline still blocks when this run drops it.
+        absent = sorted(base_ids - {r["id"] for r in results})
         if absent:
-            problems.append(f"{len(absent)} baseline ids are missing from this run: {', '.join(absent[:10])}")
+            problems.append(f"{len(absent)} baseline ids are missing from this run: {show_ids(absent)}")
         absent_must = sorted(set(absent) & base_must_pass)
         if absent_must:
             # A regression row the candidate didn't produce can't count as passing.
@@ -337,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  vs baseline: {v['baseline_rate']:.3f} -> {v['candidate_rate']:.3f}  delta {v['delta']:+.3f}  "
               f"95% CI [{v['ci'][0]:+.3f}, {v['ci'][1]:+.3f}]  n={v['n']}  band={v['band']}")
     if must_fail:
-        print(f"  regression set failures: {', '.join(must_fail)}")
+        print(f"  regression set failures: {show_ids(must_fail, limit=None)}")
     for reason in problems:
         print(f"  problem: {reason}")
     for note in notes:
@@ -350,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         level = "error" if failed else "warning"
         details = list(problems)
         if must_fail:
-            details.append(f"regression rows failed: {', '.join(must_fail)}")
+            details.append(f"regression rows failed: {show_ids(must_fail, limit=None)}")
         if "vs_baseline" in summary:
             v = summary["vs_baseline"]
             details.append(f"delta {v['delta']:+.3f}, 95% CI [{v['ci'][0]:+.3f}, {v['ci'][1]:+.3f}], n={v['n']}")

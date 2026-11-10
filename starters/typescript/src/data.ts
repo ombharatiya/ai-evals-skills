@@ -27,35 +27,61 @@ export interface Row {
   [key: string]: unknown;
 }
 
+const JSON_SPACE = " \t\r\n";
+
+/** Trim JSON whitespace (space, tab, CR, LF) only, the way the Python starter's strip(" \t\r\n") does. */
+export function trimSpace(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && JSON_SPACE.includes(text[start]!)) start++;
+  while (end > start && JSON_SPACE.includes(text[end - 1]!)) end--;
+  return text.slice(start, end);
+}
+
+/**
+ * Read a UTF-8 file the way the Python starter does: a leading byte-order mark
+ * is dropped and CRLF or CR line endings become LF, so a rubric saved on
+ * Windows hashes the same in both languages.
+ */
+export function readText(path: string): string {
+  const text = readFileSync(path, "utf8");
+  return (text.startsWith("\ufeff") ? text.slice(1) : text).replace(/\r\n?/g, "\n");
+}
+
+/** [line number, line] for each non-blank line of a JSONL file. */
+export function jsonlLines(path: string): [number, string][] {
+  return readText(path)
+    .split("\n")
+    .map((line, index): [number, string] => [index + 1, line])
+    .filter(([, line]) => trimSpace(line) !== "");
+}
+
 export function loadJsonl(path: string, requireLabel = false): Row[] {
   const rows: Row[] = [];
   const seen = new Set<string>();
-  readFileSync(path, "utf8")
-    .split("\n")
-    .forEach((line, index) => {
-      if (!line.trim()) return;
-      const where = path + ":" + (index + 1);
-      let row: Row;
-      try {
-        row = JSON.parse(line) as Row;
-      } catch {
-        throw new Error(where + ": not valid JSON");
-      }
-      if (row === null || typeof row !== "object" || Array.isArray(row)) throw new Error(where + ": each line must be a JSON object");
-      for (const field of ["id", "query", "response"] as const) {
-        if (typeof row[field] !== "string") throw new Error(where + ": '" + field + "' must be a string");
-      }
-      if (seen.has(row.id)) throw new Error(where + ": duplicate id " + row.id);
-      seen.add(row.id);
-      if (row.label !== undefined && row.label !== null) {
-        const label = String(row.label).toUpperCase();
-        if (label !== "PASS" && label !== "FAIL") throw new Error(where + ": label must be PASS or FAIL");
-        row.label = label;
-      } else if (requireLabel) {
-        throw new Error(where + ": 'label' is required here");
-      }
-      rows.push(row);
-    });
+  jsonlLines(path).forEach(([lineno, line]) => {
+    const where = path + ":" + lineno;
+    let row: Row;
+    try {
+      row = JSON.parse(line) as Row;
+    } catch {
+      throw new Error(where + ": not valid JSON");
+    }
+    if (row === null || typeof row !== "object" || Array.isArray(row)) throw new Error(where + ": each line must be a JSON object");
+    for (const field of ["id", "query", "response"] as const) {
+      if (typeof row[field] !== "string") throw new Error(where + ": '" + field + "' must be a string");
+    }
+    if (seen.has(row.id)) throw new Error(where + ": duplicate id " + row.id);
+    seen.add(row.id);
+    if (row.label !== undefined && row.label !== null) {
+      const label = String(row.label).toUpperCase();
+      if (label !== "PASS" && label !== "FAIL") throw new Error(where + ": label must be PASS or FAIL");
+      row.label = label;
+    } else if (requireLabel) {
+      throw new Error(where + ": 'label' is required here");
+    }
+    rows.push(row);
+  });
   if (rows.length === 0) throw new Error(path + ": no rows");
   return rows;
 }

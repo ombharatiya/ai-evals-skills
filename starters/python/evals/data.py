@@ -23,12 +23,33 @@ LABELS = ("PASS", "FAIL")
 Row = dict[str, Any]
 
 
+JSON_SPACE = " \t\r\n"
+
+
+def read_text(path: str | Path) -> str:
+    """Read a UTF-8 file the way the TypeScript starter does.
+
+    A leading byte-order mark is dropped and CRLF or CR line endings become
+    LF, so a rubric saved on Windows hashes the same in both languages.
+    """
+    text = Path(path).read_bytes().decode("utf-8")
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def jsonl_lines(path: str | Path):
+    """(line number, line) for each non-blank line. Splits on \\n only: JSON
+    strings may hold U+2028 and friends, which str.splitlines() would split on."""
+    for lineno, line in enumerate(read_text(path).split("\n"), start=1):
+        if line.strip(JSON_SPACE):
+            yield lineno, line
+
+
 def load_jsonl(path: str | Path, require_label: bool = False) -> list[Row]:
     rows: list[Row] = []
     seen: set[str] = set()
-    for lineno, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
+    for lineno, line in jsonl_lines(path):
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:

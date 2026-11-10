@@ -18,7 +18,9 @@ https://www.aievals.co/learn/production/drift-detection
 Rules:
 
 - Keep the judge out of the smoke tier. Prefer assertions to judges in CI.
-- Shard by dataset row. Pin the judge config and the dataset hash per release.
+- Shard by dataset row, and shard the baseline the same way: a shard compared with the whole
+  baseline is missing the other shards' rows, and the starters report that run as invalid.
+  Pin the judge config and the dataset hash per release.
 - Enforce a hard cost cap in the runner (`EVAL_BUDGET_USD`), not a warning.
 - Fork PRs don't get API secrets. Never check out untrusted PR code in a job that has them.
 - Post a result table on the PR: baseline, candidate, difference, 95% interval, and a
@@ -62,7 +64,7 @@ investigation.
   at least plus or minus 5.3 points at 50 rows, 2.7 at 100 and 1.4 at 200, and a 1-point
   window needs at least 280 rows (360 at a 90% pass rate, 410 at 97%). Those are floors
   for a judge that never flips a label. A judge that flips 2% of its labels between
-  identical runs needs about 830 rows for the same window at 76%, and one that flips 5%
+  identical runs needs about 860 rows for the same window at 76%, and one that flips 5%
   about 1,960. The starters print this resolution on every run, using the flip rate from a
   calibration run with `--repeats 2`. When outputs are regenerated for each run, size the
   window from an A/A run: score the unchanged system twice and compare.

@@ -39,8 +39,14 @@ if len(text.splitlines()) >= 500:
 import subprocess
 
 # Only files tracked in git, so a local venv or node_modules never trips the check.
-tracked = subprocess.run(["git", "ls-files", "*.md", "*.mdc"], cwd=ROOT, capture_output=True, text=True, check=True)
-files = sorted(ROOT / line for line in tracked.stdout.splitlines() if line)
+# Outside a git checkout (a zip or tarball), walk the tree and skip those folders.
+try:
+    tracked = subprocess.run(["git", "ls-files", "*.md", "*.mdc"], cwd=ROOT, capture_output=True, text=True, check=True)
+    files = sorted(ROOT / line for line in tracked.stdout.splitlines() if line)
+except (OSError, subprocess.CalledProcessError):
+    skip = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "runs"}
+    files = sorted(p for p in ROOT.rglob("*") if p.suffix in (".md", ".mdc") and p.is_file()
+                   and not skip & set(p.relative_to(ROOT).parts))
 for path in files:
     body = path.read_text(encoding="utf-8")
     for target in re.findall(r"\]\(([^)#]+)\)", body):

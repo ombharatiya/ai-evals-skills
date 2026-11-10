@@ -238,5 +238,42 @@ def test_fail_on_lets_ci_report_a_hold_without_failing(tmp_path, monkeypatch, ca
                           "read the rows in results.jsonl (the eval-run artifact in CI)"]
 
 
+def test_jsonl_keeps_unicode_line_separators_and_reads_windows_files(tmp_path):
+    from evals.data import write_jsonl
+
+    row = {"id": "a", "query": "q", "response": "line one\u2028line two\u0085three"}
+    write_jsonl(tmp_path / "x.jsonl", [row])
+    assert load_jsonl(tmp_path / "x.jsonl") == [row]
+    (tmp_path / "w.jsonl").write_bytes(b'\xef\xbb\xbf{"id": "a", "query": "q", "response": "r"}\r\n\r\n')
+    assert load_jsonl(tmp_path / "w.jsonl") == [{"id": "a", "query": "q", "response": "r"}]
+
+
+def test_a_regression_row_with_no_baseline_verdict_still_blocks_when_dropped(tmp_path, monkeypatch):
+    rows = [{"id": f"r{i}", "query": "q", "response": "fine"} for i in range(40)]
+    data = _write_rows(tmp_path / "data.jsonl", rows)
+    rubric = tmp_path / "rubric.md"
+    rubric.write_text("R")
+    base = [{"id": f"r{i}", "passed": True} for i in range(40)] + [{"id": "rx", "passed": None, "must_pass": True}]
+    base_path = _write_rows(tmp_path / "base.jsonl", base)
+    code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric), "--baseline", str(base_path),
+                                                 "--indifference", "0.2"])
+    assert code == 1 and summary["verdict"] == "block" and summary["must_pass_failures"] == ["rx"]
+
+
+def test_ids_cannot_inject_workflow_commands(tmp_path, monkeypatch, capsys):
+    rows = [{"id": f"r{i}", "query": "q", "response": "fine"} for i in range(40)]
+    data = _write_rows(tmp_path / "data.jsonl", rows)
+    rubric = tmp_path / "rubric.md"
+    rubric.write_text("R")
+    base = [{"id": f"r{i}", "passed": True} for i in range(40)] + [{"id": "x\n::notice::injected", "passed": True}]
+    base_path = _write_rows(tmp_path / "base.jsonl", base)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric), "--baseline", str(base_path)])
+    assert code == 1 and summary["verdict"] == "invalid"
+    commands = [line for line in capsys.readouterr().out.splitlines() if line.startswith("::")]
+    assert len(commands) == 1 and commands[0].startswith("::error title=Release gate INVALID::")
+    assert "x\\n::notice::injected" in commands[0]
+
+
 def test_annotations_escape_text_from_the_data():
     assert annotation_text("id 100%\nnext") == "id 100%25%0Anext"

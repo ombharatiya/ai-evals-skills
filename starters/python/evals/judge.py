@@ -149,7 +149,8 @@ def pick_few_shots(train: list[Row], n: int = 4) -> list[Row]:
 
 
 def render_system(config: JudgeConfig) -> str:
-    parts = [SYSTEM_PREAMBLE, "<rubric>\n" + config.rubric.strip() + "\n</rubric>"]
+    # Trim only ASCII whitespace: Python's strip() and JavaScript's trim() disagree on the rest.
+    parts = [SYSTEM_PREAMBLE, "<rubric>\n" + config.rubric.strip(" \t\r\n") + "\n</rubric>"]
     if config.few_shots:
         shots = []
         for r in config.few_shots:

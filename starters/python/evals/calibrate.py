@@ -25,7 +25,7 @@ from pathlib import Path
 
 import anthropic
 
-from .data import class_counts, dumps, file_sha256, load_jsonl, split_rows, write_jsonl
+from .data import class_counts, dumps, file_sha256, load_jsonl, read_text, split_rows, write_jsonl
 from .judge import ClaudeJudge, Judge, JudgeConfig, pick_few_shots, price_known
 from .metrics import judge_report
 from .runner import Budget, judge_rows
@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         budget = Budget.from_env()
         rows = load_jsonl(args.data, require_label=True)
-        rubric = Path(args.rubric).read_text(encoding="utf-8")
+        rubric = read_text(args.rubric)
     except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)
         return 2

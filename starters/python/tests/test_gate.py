@@ -53,5 +53,9 @@ def test_resolution_says_how_many_rows_a_window_needs():
 def test_resolution_accounts_for_judge_flips():
     from evals.gate import rows_for_indifference
 
-    assert rows_for_indifference(0.76, 0.01, flip_rate=0.02) == 831
-    assert rows_for_indifference(0.76, 0.01, flip_rate=0.05) == 1959
+    assert rows_for_indifference(0.76, 0.01, flip_rate=0.02) == 856
+    assert rows_for_indifference(0.76, 0.01, flip_rate=0.05) == 1957
+    # Expected flips aren't rounded to whole rows, so once a size fits, every larger size does.
+    from evals.gate import no_change_halfwidth
+    assert no_change_halfwidth(855, 0.76, 0.02) > 0.01
+    assert all(no_change_halfwidth(n, 0.76, 0.02) <= 0.01 for n in range(856, 1300))
