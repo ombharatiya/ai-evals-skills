@@ -111,3 +111,19 @@ group("parity with the Python starter", () => {
     expect(estimateCost("claude-opus-5-5", usage, "claude-opus-4-8")).toBeCloseTo((1000 * 5 + 400 * 25) / 1e6, 12);
   });
 });
+
+group("run-eval --fail-on", () => {
+  it("reports a hold without failing when CI asks only to fail on investigate and block", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-"));
+    const rubric = join(dir, "rubric.md");
+    writeFileSync(rubric, "R");
+    const data = writeLines(join(dir, "data.jsonl"), Array.from({ length: 20 }, (_, i) => ({ id: "r" + i, query: "q", response: "fine" })));
+    const base = writeLines(join(dir, "base.jsonl"), Array.from({ length: 20 }, (_, i) => ({ id: "r" + i, passed: true })));
+    const strict = await runEval(dir, ["--data", data, "--rubric", rubric, "--baseline", base]);
+    expect(strict.summary.verdict).toBe("hold");
+    expect(strict.code).toBe(1);
+    const ci = await runEval(dir, ["--data", data, "--rubric", rubric, "--baseline", base, "--fail-on", "investigate,block"]);
+    expect(ci.summary.verdict).toBe("hold");
+    expect(ci.code).toBe(0);
+  }, 60_000);
+});

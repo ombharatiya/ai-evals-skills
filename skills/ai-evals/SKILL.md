@@ -24,7 +24,7 @@ Follow these in every eval task, whatever the user asked for.
 
 1. **Look at traces before writing metrics.** You can't specify failure modes of a system
    you haven't observed. If the user has no traces, get some first: production logs, or
-   the system run on 20 to 50 realistic inputs. Then read them.
+   the system run on 100 realistic inputs. Then read them.
 2. **People label; you propose.** Never write ground-truth labels yourself and present them
    as human judgments. You may draft labels marked `"provisional": true` for a person to
    confirm. Never let a model write both the input and its gold answer, except where code
@@ -159,7 +159,10 @@ Three tiers: a smoke tier of 10 to 50 deterministic assertions on every push (no
 a full tier with the calibrated judge on PRs that change prompts or models, and a nightly
 tier with the expanded regression and robustness sets. Post a baseline-versus-candidate
 table on the PR with the delta, its 95% interval and a ship, hold, investigate or block
-verdict. No silent overrides: an override needs a named person and a written reason. Fork
+verdict. Fail the job on investigate, block or a regression-set failure, and report a hold
+for a named person to read: a hold means the interval can't tell the change from no change.
+Size the indifference window from an A/A run of the unchanged system, not from the zero-noise
+floor. No silent overrides: an override needs a named person and a written reason. Fork
 PRs get no API secrets. Details in [references/ci-and-release-gates.md](references/ci-and-release-gates.md).
 
 ## How to report results

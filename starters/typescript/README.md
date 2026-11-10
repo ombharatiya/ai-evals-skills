@@ -79,8 +79,14 @@ Every run prints the gate set's resolution: how wide the interval is for a candi
 matches the baseline on every row. At a 76% pass rate that's about plus or minus 5.3 points
 with 50 rows, so the 1-point default window needs at least 280 rows, and about 830 if the
 judge flips 2% of its labels between identical runs. With a `--repeats 2` calibration record
-passed as `--calibration`, the resolution uses the measured flip rate. Grow the set, or pass
-`--indifference` at least as wide as the printed resolution.
+passed as `--calibration`, the resolution uses the measured flip rate.
+
+These figures are floors. When CI regenerates outputs on every pull request, generation
+noise and judge noise widen the interval further, so size the window from an A/A run:
+generate and score the unchanged system twice, compare the second run with the first using
+`--baseline`, and set `--indifference` a little above the interval that prints. In CI, pass
+`--fail-on investigate,block`: a hold then shows as a warning on the pull request for a
+person to read, and only a confirmed regression or a regression-set failure fails the job.
 
 ## Pinning and cost
 

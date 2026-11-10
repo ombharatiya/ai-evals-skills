@@ -12,8 +12,11 @@ of the rubric. results.jsonl is written as soon as scoring finishes.
 
 With --baseline (an earlier results.jsonl), it pairs the two runs on their
 shared ids, computes the difference in pass rate with Newcombe's paired
-interval, and prints ship, hold, investigate or block. Exit code 0 for ship
-(or a first run with no baseline), 1 otherwise, so CI can use it directly.
+interval, and prints ship, hold, investigate or block. By default the exit code
+is 0 for ship (or a first run with no baseline) and 1 otherwise. In CI, pass
+--fail-on investigate,block so a hold is reported for a person to read instead
+of failing every build; on GitHub Actions the verdict also shows as a warning
+or error annotation on the pull request.
 
 Nothing ships silently:
 - any failing row marked "must_pass": true (the regression set) blocks
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -155,11 +159,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--indifference", type=float, default=0.01, help="ship when the whole interval is within this")
     p.add_argument("--minor-regression", type=float, default=0.02, help="a sure drop up to this is investigate")
     p.add_argument("--min-paired", type=int, default=30, help="fewest paired rows a ship can rest on")
+    p.add_argument("--fail-on", default="hold,investigate,block",
+                   help="verdicts that exit 1 (CI: investigate,block reports a hold for a person to read)")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--model", default=None)
     p.add_argument("--effort", default=None)
     p.add_argument("--out", default="runs")
     args = p.parse_args(argv)
+    fail_on = {v.strip() for v in args.fail_on.split(",") if v.strip()}
+    if not fail_on <= {"hold", "investigate", "block"}:
+        p.error("--fail-on takes a comma list of hold, investigate and block")
 
     # Check every input before spending anything on judge calls.
     try:
@@ -288,14 +297,15 @@ def main(argv: list[str] | None = None) -> int:
         needed = rows_for_indifference(res_rate, args.indifference, start=res_n, flip_rate=flip_rate)
         summary["resolution"] = {"n": res_n, "flip_rate": flip_rate, "no_change_halfwidth": half,
                                  "rows_for_indifference": needed}
-        flips_text = (f" with the judge flipping {flip_rate:.1%} of labels between runs" if flip_rate
-                      else " (a floor: it assumes the judge never flips a label; calibrate with --repeats 2 to measure flips)")
+        flips_text = (f" and the judge flipping {flip_rate:.1%} of labels between runs" if flip_rate
+                      else " and a judge that never flips a label")
         if half > args.indifference:
             notes.append(
-                f"with {res_n} rows at this pass rate{flips_text}, an unchanged candidate's interval is about +-{half:.3f}, "
-                f"wider than the {args.indifference:.3f} indifference window, so no candidate can ship by staying the same. "
-                + (f"Grow the gate set to about {needed} rows, or pass --indifference {half:.3f} or more" if needed
-                   else f"Pass --indifference {half:.3f} or more")
+                f"with {res_n} rows at this pass rate{flips_text}, an unchanged candidate's interval is at least "
+                f"+-{half:.3f}, wider than the {args.indifference:.3f} indifference window, so a candidate can't ship by "
+                f"staying the same. This is a floor: regenerated outputs and judge noise widen it. Size the window from an "
+                f"A/A run (score the unchanged system twice and compare)"
+                + (f", or grow the gate set past {needed} rows" if needed else "")
             )
     summary["notes"] = notes
     if must_fail:
@@ -324,7 +334,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  note: {note}")
     print(f"  estimated cost ${summary['estimated_cost_usd']:.2f}")
     print(f"verdict: {verdict.upper()}   wrote {out_dir}")
-    return 0 if verdict in ("ship", "baseline") else 1
+    failed = verdict in fail_on
+    if os.environ.get("GITHUB_ACTIONS") == "true" and verdict not in ("ship", "baseline"):
+        # Show the verdict on the pull request even when it doesn't fail the job.
+        level = "error" if failed else "warning"
+        reasons = "; ".join(holds + ([f"regression rows failed: {', '.join(must_fail)}"] if must_fail else []))
+        print(f"::{level} title=Release gate {verdict.upper()}::{reasons or 'see the eval summary'}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ explain a choice.
 ## Ground rules
 
 1. Look at traces before writing metrics. If there are none, get some (production logs, or
-   the system run on 20 to 50 realistic inputs) and have a person read them first.
+   the system run on 100 realistic inputs) and have a person read them first.
 2. People label; you propose. Never write ground-truth labels and present them as human.
    Draft labels are marked `"provisional": true`. Never let a model write both an input and
    its gold answer, unless code computes the answer.

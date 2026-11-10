@@ -23,6 +23,9 @@ Rules:
 - Fork PRs don't get API secrets. Never check out untrusted PR code in a job that has them.
 - Post a result table on the PR: baseline, candidate, difference, 95% interval, and a
   one-line verdict (ship, hold, investigate or block). Template in [templates.md](templates.md).
+- Fail the job on investigate, block and regression-set failures. Report a hold for a named
+  person to read the regressed slice; failing the build on every hold trains people to
+  ignore red checks. The starters do this with `--fail-on investigate,block`.
 - No silent overrides. An override needs a named person and a written reason, logged where
   it can be queried. A pattern of overrides means the bands need retuning.
 - A CI eval that never fails isn't testing anything. The regression set is the one suite
@@ -59,7 +62,8 @@ investigation.
   for a judge that never flips a label. A judge that flips 2% of its labels between
   identical runs needs about 830 rows for the same window at 76%, and one that flips 5%
   about 1,960. The starters print this resolution on every run, using the flip rate from a
-  calibration run with `--repeats 2`.
+  calibration run with `--repeats 2`. When outputs are regenerated for each run, size the
+  window from an A/A run: score the unchanged system twice and compare.
 - The release decision is the worst band across all axes.
 - Compare against the production system, per slice as well as overall.
 - Update the baseline only after the candidate has been green online for a sustained

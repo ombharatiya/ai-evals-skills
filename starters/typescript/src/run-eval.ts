@@ -10,7 +10,10 @@
  * drill-down, and writes results.jsonl as soon as scoring finishes. With
  * --baseline it pairs the runs on shared ids, computes the difference with
  * Newcombe's paired interval, and prints ship / hold / investigate / block.
- * Exit code 0 for ship (or a first run with no baseline), 1 otherwise.
+ * By default the exit code is 0 for ship (or a first run with no baseline) and
+ * 1 otherwise. In CI, pass --fail-on investigate,block so a hold is reported
+ * for a person to read instead of failing every build; on GitHub Actions the
+ * verdict also shows as an annotation on the pull request.
  *
  * Nothing ships silently: a failing "must_pass" row blocks; rows with no
  * verdict, ids missing from the baseline, fewer than --min-paired paired rows,
@@ -157,6 +160,7 @@ async function main(): Promise<number> {
       indifference: { type: "string", default: "0.01" },
       "minor-regression": { type: "string", default: "0.02" },
       "min-paired": { type: "string", default: "30" },
+      "fail-on": { type: "string", default: "hold,investigate,block" },
       workers: { type: "string", default: "4" },
       model: { type: "string" },
       effort: { type: "string" },
@@ -172,7 +176,12 @@ async function main(): Promise<number> {
   let setup;
   try {
     if (values.effort && !EFFORTS.includes(values.effort as Effort)) throw new Error("--effort must be one of " + EFFORTS.join(", "));
+    const failOn = new Set((values["fail-on"] ?? "").split(",").map((v) => v.trim()).filter(Boolean));
+    if ([...failOn].some((v) => !["hold", "investigate", "block"].includes(v))) {
+      throw new Error("--fail-on takes a comma list of hold, investigate and block");
+    }
     setup = {
+      failOn,
       seed: numberFlag("seed", values.seed, { integer: true }),
       fewShots: numberFlag("few-shots", values["few-shots"], { integer: true, min: 0 }),
       indifference: numberFlag("indifference", values.indifference, { min: 0 }),
@@ -308,14 +317,13 @@ async function main(): Promise<number> {
     const half = noChangeHalfwidth(resN, resRate, flipRate);
     const needed = rowsForIndifference(resRate, setup.indifference, resN, 1_000_000, flipRate);
     summary.resolution = { n: resN, flip_rate: flipRate, no_change_halfwidth: half, rows_for_indifference: needed };
-    const flipsText = flipRate
-      ? " with the judge flipping " + (flipRate * 100).toFixed(1) + "% of labels between runs"
-      : " (a floor: it assumes the judge never flips a label; calibrate with --repeats 2 to measure flips)";
+    const flipsText = flipRate ? " and the judge flipping " + (flipRate * 100).toFixed(1) + "% of labels between runs" : " and a judge that never flips a label";
     if (half > setup.indifference) {
       notes.push(
-        "with " + resN + " rows at this pass rate" + flipsText + ", an unchanged candidate's interval is about +-" + half.toFixed(3) +
-          ", wider than the " + setup.indifference.toFixed(3) + " indifference window, so no candidate can ship by staying the same. " +
-          (needed ? "Grow the gate set to about " + needed + " rows, or pass --indifference " + half.toFixed(3) + " or more" : "Pass --indifference " + half.toFixed(3) + " or more"),
+        "with " + resN + " rows at this pass rate" + flipsText + ", an unchanged candidate's interval is at least +-" + half.toFixed(3) +
+          ", wider than the " + setup.indifference.toFixed(3) + " indifference window, so a candidate can't ship by staying the same. " +
+          "This is a floor: regenerated outputs and judge noise widen it. Size the window from an A/A run (score the unchanged system twice and compare)" +
+          (needed ? ", or grow the gate set past " + needed + " rows" : ""),
       );
     }
   }
@@ -340,7 +348,13 @@ async function main(): Promise<number> {
   for (const note of notes) console.log("  note: " + note);
   console.log("  estimated cost $" + (summary.estimated_cost_usd as number).toFixed(2));
   console.log("verdict: " + verdict.toUpperCase() + "   wrote " + outDir);
-  return verdict === "ship" || verdict === "baseline" ? 0 : 1;
+  const failed = setup.failOn.has(verdict);
+  if (process.env.GITHUB_ACTIONS === "true" && verdict !== "ship" && verdict !== "baseline") {
+    // Show the verdict on the pull request even when it doesn't fail the job.
+    const reasons = [...holds, ...(mustFail.length ? ["regression rows failed: " + mustFail.join(", ")] : [])].join("; ");
+    console.log("::" + (failed ? "error" : "warning") + " title=Release gate " + verdict.toUpperCase() + "::" + (reasons || "see the eval summary"));
+  }
+  return failed ? 1 : 0;
 }
 
 if (isMain(import.meta.url)) {

@@ -212,3 +212,16 @@ def test_calibrate_rejects_zero_repeats(capsys):
 
     with pytest.raises(SystemExit):
         calibrate_mod.main(["--data", "x", "--rubric", "y", "--repeats", "0"])
+
+
+def test_fail_on_lets_ci_report_a_hold_without_failing(tmp_path, monkeypatch):
+    rows = [{"id": f"r{i}", "query": "q", "response": "fine"} for i in range(20)]
+    data = _write_rows(tmp_path / "data.jsonl", rows)
+    rubric = tmp_path / "rubric.md"
+    rubric.write_text("R")
+    base = _write_rows(tmp_path / "base.jsonl", [{"id": f"r{i}", "passed": True} for i in range(20)])
+    code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric), "--baseline", str(base)])
+    assert summary["verdict"] == "hold" and code == 1
+    code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric), "--baseline", str(base),
+                                                 "--fail-on", "investigate,block"])
+    assert summary["verdict"] == "hold" and code == 0

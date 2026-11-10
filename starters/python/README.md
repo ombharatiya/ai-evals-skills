@@ -122,8 +122,14 @@ rate that's about plus or minus 5.3 points with 50 rows, so a 1-point window wou
 every unchanged candidate; the 1-point default needs at least 280 rows. That's a floor for a
 judge that never flips a label: with 2% flips between identical runs it's about 830 rows.
 Calibrate with `--repeats 2` and pass that record with `--calibration`, and the resolution
-uses the measured flip rate. Grow the set, or pass
-`--indifference` at least as wide as the printed resolution.
+uses the measured flip rate.
+
+These figures are floors. When CI regenerates outputs on every pull request, generation
+noise and judge noise widen the interval further, so size the window from an A/A run:
+generate and score the unchanged system twice, compare the second run with the first using
+`--baseline`, and set `--indifference` a little above the interval that prints. In CI, pass
+`--fail-on investigate,block`: a hold then shows as a warning on the pull request for a
+person to read, and only a confirmed regression or a regression-set failure fails the job.
 
 ## Pinning and cost
 
