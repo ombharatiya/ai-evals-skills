@@ -5,10 +5,11 @@ The prompt has the four parts the aievals.co judge guide uses: the rubric
 few-shot examples drawn from the train split only, the trace under review,
 and a strict JSON output schema enforced with structured outputs.
 
-Everything that changes the judge's behavior is pinned in `JudgeConfig` and
-written next to every result: model, effort, rubric hash, few-shot ids. Your
-calibration numbers belong to that exact configuration. Change any of it and
-calibrate again.
+Everything that changes the judge's behavior is fingerprinted in
+`JudgeConfig.describe()`: the model, the effort, and a hash of the rendered
+system prompt (rubric, few-shot text, instructions), the output schema and
+max_tokens. Your calibration numbers belong to that exact fingerprint.
+Change any of it and calibrate again.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ Row = dict[str, Any]
 
 DEFAULT_MODEL = os.environ.get("JUDGE_MODEL", "claude-opus-5-5")
 DEFAULT_EFFORT = os.environ.get("JUDGE_EFFORT", "medium")
+MAX_TOKENS = 16000  # thinking is on for Opus 5.5 and counts against this
 
 VERDICT_SCHEMA = {
     "type": "object",
@@ -47,16 +49,35 @@ OUTPUT_INSTRUCTIONS = (
     "decided the label. When in doubt, FAIL and say why."
 )
 
-# USD per million tokens, for the per-run budget estimate only.
-PRICES = {
-    "claude-opus-5-5": (4.00, 20.00),
-    "claude-sonnet-5-5": (2.00, 10.00),
-    "claude-haiku-5-5": (0.10, 0.50),
+# USD per million tokens: (input, output, cache read). Cache writes bill at
+# 1.25x input. Used only for the budget estimate. Includes the models the
+# `fallbacks: "default"` setting can route to. Check current prices at
+# https://platform.claude.com/docs/en/about-claude/pricing before relying on it.
+PRICES: dict[str, tuple[float, float, float]] = {
+    "claude-opus-5-5": (4.00, 20.00, 0.20),
+    "claude-sonnet-5-5": (2.00, 10.00, 0.10),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),
+    "claude-opus-5": (5.00, 25.00, 0.50),
+    "claude-opus-4-8": (5.00, 25.00, 0.50),
+    "claude-sonnet-5": (2.00, 10.00, 0.20),
+    "claude-fable-5-2": (8.00, 40.00, 0.20),
+    "claude-fable-5-1": (10.00, 50.00, 1.00),
 }
+# A model missing from the table is charged at the most expensive known rate,
+# so an unknown fallback can't slip under the budget.
+_WORST = max(PRICES.values(), key=lambda p: p[1])
+
+# Statuses that fail one row after the SDK's own retries. Anything else (a bad
+# key, an unknown model, a malformed request) would fail every row.
+ROW_LEVEL_STATUSES = {408, 409, 413, 422, 429}
 
 
 class JudgeError(RuntimeError):
-    """The judge returned no usable verdict (refusal, truncation, bad JSON)."""
+    """The judge returned no usable verdict (refusal, truncation, bad JSON, transient error)."""
+
+    def __init__(self, message: str, cost_usd: float = 0.0) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
 
 
 @dataclass(frozen=True)
@@ -83,13 +104,26 @@ class JudgeConfig:
     def rubric_sha256(self) -> str:
         return hashlib.sha256(self.rubric.encode("utf-8")).hexdigest()
 
+    @property
+    def prompt_sha256(self) -> str:
+        blob = json.dumps(
+            {"system": render_system(self), "schema": VERDICT_SCHEMA, "max_tokens": MAX_TOKENS},
+            sort_keys=True,
+        )
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
     def describe(self) -> dict[str, Any]:
         return {
             "model": self.model,
             "effort": self.effort,
+            "prompt_sha256": self.prompt_sha256,
             "rubric_sha256": self.rubric_sha256,
             "few_shot_ids": [r["id"] for r in self.few_shots],
         }
+
+
+def price_known(model: str) -> bool:
+    return model in PRICES
 
 
 def pick_few_shots(train: list[Row], n: int = 4) -> list[Row]:
@@ -135,15 +169,28 @@ def render_user(row: Row) -> str:
     )
 
 
-def estimate_cost(model: str, usage: Any) -> float:
-    if model not in PRICES or usage is None:
-        return 0.0
-    price_in, price_out = PRICES[model]
+def _cost_of(model: str | None, usage: Any) -> float:
+    price_in, price_out, price_read = PRICES.get(model or "", _WORST)
     uncached = getattr(usage, "input_tokens", 0) or 0
     written = getattr(usage, "cache_creation_input_tokens", 0) or 0
     read = getattr(usage, "cache_read_input_tokens", 0) or 0
     out = getattr(usage, "output_tokens", 0) or 0
-    return (uncached * price_in + written * price_in * 1.25 + read * price_in * 0.1 + out * price_out) / 1e6
+    return (uncached * price_in + written * price_in * 1.25 + read * price_read + out * price_out) / 1e6
+
+
+def estimate_cost(requested_model: str, usage: Any) -> float:
+    """Price each model call in the response at the model that made it.
+
+    With fallbacks, one response can hold several calls (the declined one
+    and the rescue), listed in `usage.iterations`.
+    """
+    if usage is None:
+        return 0.0
+    iterations = getattr(usage, "iterations", None) or []
+    priced = [it for it in iterations if getattr(it, "input_tokens", None) is not None]
+    if priced:
+        return sum(_cost_of(getattr(it, "model", None) or requested_model, it) for it in priced)
+    return _cost_of(requested_model, usage)
 
 
 class ClaudeJudge:
@@ -162,10 +209,7 @@ class ClaudeJudge:
         except (anthropic.APIConnectionError, anthropic.APITimeoutError) as exc:
             raise JudgeError(f"{row['id']}: {type(exc).__name__} after retries") from exc
         except anthropic.APIStatusError as exc:
-            # Rate limits and server errors fail this row after the SDK's retries.
-            # Anything else (bad key, unknown model, bad request) is a setup problem
-            # that would fail every row, so it stops the run.
-            if exc.status_code == 429 or exc.status_code >= 500:
+            if exc.status_code in ROW_LEVEL_STATUSES or exc.status_code >= 500:
                 raise JudgeError(f"{row['id']}: HTTP {exc.status_code} after retries") from exc
             raise
         return self._parse(row, response)
@@ -173,7 +217,7 @@ class ClaudeJudge:
     def _create(self, row: Row) -> Any:
         return self.client.beta.messages.create(
             model=self.config.model,
-            max_tokens=16000,  # thinking is on for Opus 5.5 and counts against this
+            max_tokens=MAX_TOKENS,
             # If Claude declines the request on a safety classifier, rerun it on a
             # fallback model inside the same call. A rescued verdict comes from a
             # different judge than the one you calibrated, so it is flagged below.
@@ -189,22 +233,27 @@ class ClaudeJudge:
         )
 
     def _parse(self, row: Row, response: Any) -> Verdict:
+        # Charge the call before deciding whether it produced a verdict:
+        # a refusal or a truncated answer still costs money.
+        cost = estimate_cost(self.config.model, getattr(response, "usage", None))
         if response.stop_reason == "refusal":
             details = getattr(response, "stop_details", None)
             category = getattr(details, "category", None) if details else None
-            raise JudgeError(f"{row['id']}: the judge declined (category: {category})")
+            raise JudgeError(f"{row['id']}: the judge declined (category: {category})", cost)
         if response.stop_reason == "max_tokens":
-            raise JudgeError(f"{row['id']}: the judge hit max_tokens before answering")
+            raise JudgeError(f"{row['id']}: the judge hit max_tokens before answering", cost)
         text = next((b.text for b in response.content if b.type == "text"), None)
         if text is None:
-            raise JudgeError(f"{row['id']}: no text block in the judge response")
+            raise JudgeError(f"{row['id']}: no text block in the judge response", cost)
         try:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise JudgeError(f"{row['id']}: judge output is not JSON: {text[:200]!r}") from exc
+            raise JudgeError(f"{row['id']}: judge output is not JSON: {text[:200]!r}", cost) from exc
+        if not isinstance(data, dict):
+            raise JudgeError(f"{row['id']}: judge output is not a JSON object: {text[:200]!r}", cost)
         label = str(data.get("label", "")).upper()
         if label not in ("PASS", "FAIL"):
-            raise JudgeError(f"{row['id']}: unexpected label {data.get('label')!r}")
+            raise JudgeError(f"{row['id']}: unexpected label {data.get('label')!r}", cost)
         iterations = getattr(response.usage, "iterations", None) or []
         fallback_used = any(getattr(it, "type", None) == "fallback_message" for it in iterations)
         served_by = getattr(response, "model", None) or self.config.model
@@ -213,5 +262,5 @@ class ClaudeJudge:
             critique=str(data.get("critique", "")),
             model=served_by,
             fallback_used=fallback_used or served_by != self.config.model,
-            cost_usd=estimate_cost(served_by, response.usage),
+            cost_usd=cost,
         )

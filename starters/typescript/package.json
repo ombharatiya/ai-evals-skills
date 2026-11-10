@@ -4,7 +4,9 @@
   "private": true,
   "description": "Binary LLM judge, calibration against human labels, and a CI release gate.",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
     "calibrate": "tsx src/calibrate.ts",
     "eval": "tsx src/run-eval.ts",

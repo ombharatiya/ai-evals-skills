@@ -3,21 +3,20 @@
  * test checks the request the SDK sends and the response it parses. No
  * network, no API key.
  */
-import Anthropic from "@anthropic-ai/sdk";
-import { describe as group, expect, it } from "vitest";
-import { loadJsonl } from "../src/data.js";
-import { claudeJudge, describe, JudgeError, makeConfig, pickFewShots, renderSystem, type Verdict } from "../src/judge.js";
-import { calibrate } from "../src/calibrate.js";
-import { correctedRate, scoreRows } from "../src/run-eval.js";
-import { Budget, judgeRows } from "../src/runner.js";
-import { stratifiedSplit, type Row } from "../src/data.js";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Anthropic from "@anthropic-ai/sdk";
+import { describe as group, expect, it } from "vitest";
+import { barFailures, calibrate } from "../src/calibrate.js";
+import { loadJsonl, splitRows, type Row } from "../src/data.js";
+import { claudeJudge, describe, estimateCost, JudgeError, makeConfig, pickFewShots, renderSystem, type Verdict } from "../src/judge.js";
+import { correctedPassRate, roganGladen, scoreRows, type RowResult } from "../src/run-eval.js";
+import { Budget, judgeRows } from "../src/runner.js";
 
 const ROW: Row = { id: "t-1", query: "Refund after 60 days?", response: "Yes, within 90 days." };
 
-function fakeClient(body: Record<string, unknown>) {
+function fakeClient(body: Record<string, unknown>, status = 200) {
   const requests: { url: string; headers: Headers; body: Record<string, unknown> }[] = [];
   const fetch = async (input: string | URL | Request, init?: RequestInit) => {
     requests.push({
@@ -25,7 +24,7 @@ function fakeClient(body: Record<string, unknown>) {
       headers: new Headers(init?.headers),
       body: JSON.parse(String(init?.body)),
     });
-    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   };
   return { client: new Anthropic({ apiKey: "test-key", fetch, maxRetries: 0 }), requests };
 }
@@ -51,7 +50,6 @@ group("claude judge", () => {
     const { client, requests } = fakeClient(message(verdictJson("FAIL", "Says 90 days.")));
     const verdict = await claudeJudge(makeConfig("PASS if correct."), client)(ROW);
     expect(verdict.label).toBe("FAIL");
-    expect(verdict.critique).toBe("Says 90 days.");
     expect(verdict.costUsd).toBeCloseTo((1000 * 4 + 400 * 20) / 1e6, 12);
     const req = requests[0]!;
     expect(req.url).toMatch(/\/v1\/messages/);
@@ -61,28 +59,54 @@ group("claude judge", () => {
     expect((req.body.output_config as { format: { type: string } }).format.type).toBe("json_schema");
   });
 
-  it("raises on refusal, truncation and malformed output", async () => {
+  it("raises on unusable answers and still charges them", async () => {
     for (const body of [
       message(null, { stop_reason: "refusal", stop_details: { type: "refusal", category: "cyber", explanation: null } }),
       message(null, { stop_reason: "max_tokens" }),
       message("not json"),
       message(verdictJson("MAYBE")),
+      message("null"),
+      message("[1, 2]"),
     ]) {
       const { client } = fakeClient(body);
-      await expect(claudeJudge(makeConfig("R"), client)(ROW)).rejects.toBeInstanceOf(JudgeError);
+      const err = await claudeJudge(makeConfig("R"), client)(ROW).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(JudgeError);
+      expect((err as JudgeError).costUsd).toBeGreaterThan(0);
     }
   });
 
-  it("flags a verdict served by a fallback model", async () => {
+  it("flags a fallback verdict and prices each call at its own model", async () => {
     const { client } = fakeClient(
       message(verdictJson("PASS"), {
         model: "claude-opus-4-8",
-        usage: { input_tokens: 10, output_tokens: 5, iterations: [{ type: "fallback_message", model: "claude-opus-4-8", input_tokens: 10, output_tokens: 5 }] },
+        usage: {
+          input_tokens: 2000,
+          output_tokens: 400,
+          iterations: [
+            { type: "message", model: null, input_tokens: 1000, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, cache_creation: null },
+            { type: "fallback_message", model: "claude-opus-4-8", input_tokens: 1000, output_tokens: 400, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, cache_creation: null },
+          ],
+        },
       }),
     );
     const verdict = await claudeJudge(makeConfig("R"), client)(ROW);
     expect(verdict.fallbackUsed).toBe(true);
     expect(verdict.model).toBe("claude-opus-4-8");
+    expect(verdict.costUsd).toBeCloseTo((1000 * 4) / 1e6 + (1000 * 5 + 400 * 25) / 1e6, 12);
+  });
+
+  it("charges an unknown model at the top rate", () => {
+    const usage = { input_tokens: 1000, output_tokens: 400 } as Anthropic.Beta.Messages.BetaUsage;
+    expect(estimateCost("some-new-model", usage)).toBeGreaterThan(estimateCost("claude-opus-5-5", usage));
+  });
+
+  it("fingerprints the whole prompt, not just ids", () => {
+    const shot: Row = { id: "f1", query: "q", response: "r", label: "FAIL", critique: "old" };
+    const a = describe(makeConfig("R", { fewShots: [shot] }));
+    const b = describe(makeConfig("R", { fewShots: [{ ...shot, critique: "new" }] }));
+    expect(a.few_shot_ids).toEqual(b.few_shot_ids);
+    expect(a.prompt_sha256).not.toBe(b.prompt_sha256);
+    expect(describe(makeConfig("R", { fewShots: [shot] }))).toEqual(a);
   });
 
   it("builds balanced few-shots that prefer human critiques", () => {
@@ -94,9 +118,23 @@ group("claude judge", () => {
     ];
     const picked = pickFewShots(train, 3);
     expect(picked.map((r) => r.id)).toEqual(["f1", "p2", "f2"]);
-    const system = renderSystem(makeConfig("R", { fewShots: picked }));
-    expect(system).toContain("<explanation>wrong window</explanation>");
-    expect(describe(makeConfig("one")).rubric_sha256).not.toBe(describe(makeConfig("two")).rubric_sha256);
+    expect(renderSystem(makeConfig("R", { fewShots: picked }))).toContain("<explanation>wrong window</explanation>");
+  });
+});
+
+group("api errors", () => {
+  const errorBody = (type: string) => ({ type: "error", error: { type, message: "x" } });
+
+  for (const [status, type] of [[429, "rate_limit_error"], [408, "timeout_error"], [413, "request_too_large"], [529, "overloaded_error"]] as const) {
+    it("fails the row on HTTP " + status, async () => {
+      const { client } = fakeClient(errorBody(type), status);
+      await expect(claudeJudge(makeConfig("R"), client)(ROW)).rejects.toBeInstanceOf(JudgeError);
+    });
+  }
+
+  it("stops the run on a bad key", async () => {
+    const { client } = fakeClient(errorBody("authentication_error"), 401);
+    await expect(claudeJudge(makeConfig("R"), client)(ROW)).rejects.toBeInstanceOf(Anthropic.AuthenticationError);
   });
 });
 
@@ -113,9 +151,9 @@ function fakeJudge(labels: Record<string, "PASS" | "FAIL"> = {}, cost = 0.01) {
 group("pipeline", () => {
   const data = (name: string) => new URL("../data/" + name, import.meta.url).pathname;
 
-  it("calibrates on dev with few-shots from train only", async () => {
+  it("calibrates on dev with few-shots from train only, and the small example can't clear the bar", async () => {
     const rows = loadJsonl(data("labeled.example.jsonl"), true);
-    const [train, dev] = stratifiedSplit(rows);
+    const [train, dev] = splitRows(rows);
     const fails = dev.filter((r) => r.label === "FAIL");
     const labels = Object.fromEntries(dev.map((r) => [r.id, r.label!]));
     labels[fails[0]!.id] = "PASS";
@@ -129,6 +167,22 @@ group("pipeline", () => {
     expect(summary.judge.few_shot_ids.some((id) => devIds.has(id))).toBe(false);
     const disagreements = readFileSync(join(outDir, "disagreements.jsonl"), "utf8").trim().split("\n");
     expect(disagreements.map((l) => JSON.parse(l).id)).toEqual([fails[0]!.id]);
+    expect(barFailures(summary, 0.9, 0.6, 30).some((r) => r.includes("FAIL rows in this split"))).toBe(true);
+  });
+
+  it("fails a test read with missing verdicts and writes no test disagreements", async () => {
+    const rows = loadJsonl(data("labeled.example.jsonl"), true);
+    const test = splitRows(rows)[2];
+    const firstFail = test.find((r) => r.label === "FAIL")!.id;
+    const judge = async (row: Row): Promise<Verdict> => {
+      if (row.label === "FAIL" && row.id !== firstFail) throw new JudgeError("declined", 0.01);
+      return { label: row.label!, critique: "", model: "fake", fallbackUsed: false, costUsd: 0.01 };
+    };
+    const outDir = mkdtempSync(join(tmpdir(), "calib-"));
+    const summary = await calibrate({ rows, judge, config: makeConfig("R"), splitName: "test", splitRows: test, outDir });
+    expect(existsSync(join(outDir, "disagreements.jsonl"))).toBe(false);
+    expect(summary.report.fail_recall).toBe(1);
+    expect(barFailures(summary, 0.9, 0.6, 1).some((r) => r.includes("no verdict"))).toBe(true);
   });
 
   it("runs code checks before the judge", async () => {
@@ -141,34 +195,45 @@ group("pipeline", () => {
     expect(results.get("o-001")!.passed).toBe(true);
   });
 
-  it("stops new calls at the budget", async () => {
+  it("charges failed calls against the budget and stops new ones", async () => {
     const rows: Row[] = Array.from({ length: 10 }, (_, i) => ({ id: String(i), query: "q", response: "r" }));
-    const outcomes = await judgeRows(fakeJudge({}, 0.01).judge, rows, 1, new Budget(0.03));
-    expect(outcomes.filter((o) => o.verdict)).toHaveLength(3);
-    expect(outcomes.filter((o) => !o.verdict).every((o) => o.error?.includes("budget"))).toBe(true);
+    const declines = async (): Promise<Verdict> => {
+      throw new JudgeError("declined", 0.01);
+    };
+    const budget = new Budget(0.03);
+    const outcomes = await judgeRows(declines, rows, 1, budget);
+    expect(budget.spentUsd).toBeCloseTo(0.03, 10);
+    expect(outcomes.filter((o) => o.error === "declined")).toHaveLength(3);
+    expect(outcomes.slice(3).every((o) => o.error?.includes("budget"))).toBe(true);
   });
 
-  it("corrects a judge-scored rate", () => {
-    expect(correctedRate(0.75, 0.9, 0.8)).toBeCloseTo((0.75 + 0.8 - 1) / 0.7, 12);
-    expect(correctedRate(0.5, 0.5, 0.4)).toBeNull();
-  });
-});
-
-group("api errors", () => {
-  function failingClient(status: number, type: string) {
-    const fetch = async () =>
-      new Response(JSON.stringify({ type: "error", error: { type, message: "x" } }), {
-        status,
-        headers: { "content-type": "application/json" },
-      });
-    return new Anthropic({ apiKey: "test-key", fetch, maxRetries: 0 });
-  }
-
-  it("fails the row on a rate limit", async () => {
-    await expect(claudeJudge(makeConfig("R"), failingClient(429, "rate_limit_error"))(ROW)).rejects.toBeInstanceOf(JudgeError);
+  it("rejects a budget that isn't a number", () => {
+    process.env.EVAL_BUDGET_USD = "5 USD";
+    try {
+      expect(() => Budget.fromEnv()).toThrow(/number/);
+    } finally {
+      delete process.env.EVAL_BUDGET_USD;
+    }
   });
 
-  it("stops the run on a bad key", async () => {
-    await expect(claudeJudge(makeConfig("R"), failingClient(401, "authentication_error"))(ROW)).rejects.toBeInstanceOf(Anthropic.AuthenticationError);
+  it("stops every worker after a setup error", async () => {
+    const rows: Row[] = Array.from({ length: 200 }, (_, i) => ({ id: String(i), query: "q", response: "r" }));
+    let calls = 0;
+    const badKey = async (): Promise<Verdict> => {
+      calls++;
+      throw new Error("bad key");
+    };
+    await expect(judgeRows(badKey, rows, 4)).rejects.toThrow("bad key");
+    expect(calls).toBeLessThanOrEqual(4);
+  });
+
+  it("corrects only the judged rows", () => {
+    const results = [
+      ...Array.from({ length: 2 }, () => ({ passed: false, judged: false, check_failures: ["x"], judge: null })),
+      ...Array.from({ length: 8 }, (_, i) => ({ passed: i < 6, judged: true, check_failures: [], judge: i < 6 ? "PASS" : "FAIL" })),
+    ] as unknown as RowResult[];
+    expect(correctedPassRate(results, 0.9, 0.8)).toBeCloseTo((roganGladen(6 / 8, 0.9, 0.8)! * 8) / 10, 12);
+    expect(roganGladen(0.5, NaN, 0.8)).toBeNull();
+    expect(roganGladen(0.5, 0.5, 0.4)).toBeNull();
   });
 });

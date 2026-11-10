@@ -61,8 +61,10 @@ Labels should be specific, actionable, distinguishable, counted and revisable.
 - Either change means relabeling the affected traces.
 - Build the taxonomy bottom-up from your own traces. Generic labels such as
   "hallucination", "refusal" and "toxicity" are a starting checklist, not a label set.
-  Expect 6 to 9 specific labels after a half-day pass (Hamel Husain, "A Field Guide to
-  Rapidly Improving AI Products", https://hamel.dev/blog/posts/field-guide/).
+  Generic labels hide different mechanisms with different fixes (Hamel Husain, "A Field
+  Guide to Rapidly Improving AI Products", https://hamel.dev/blog/posts/field-guide/). The
+  guide's taxonomy page expects six to nine specific categories after a half-day pass; axial
+  coding on a first batch of notes usually lands at four to seven.
 - For agents, the MAST taxonomy (Cemri et al. 2025, https://arxiv.org/abs/2503.13657) is a
   useful checklist: 14 failure modes in 3 categories, built from 150 annotated traces at
   kappa 0.88. Use it to prompt your reading, not as your label set.

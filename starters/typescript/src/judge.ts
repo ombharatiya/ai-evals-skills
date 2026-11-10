@@ -4,17 +4,23 @@
  * The prompt has the four parts the aievals.co judge guide uses: the rubric
  * (role, definitions, PASS/FAIL criteria) from your rubric file, few-shots
  * from the train split only, the trace under review, and a strict JSON
- * schema enforced with structured outputs. Everything that changes the
- * judge is pinned in JudgeConfig and written next to every result.
+ * schema enforced with structured outputs.
+ *
+ * describe() fingerprints everything that changes the judge: the model, the
+ * effort, and a hash of the rendered system prompt (rubric, few-shot text,
+ * instructions), the output schema and max_tokens. Calibration numbers
+ * belong to that exact fingerprint. Change any of it and calibrate again.
  */
 import { createHash } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Label, Row } from "./data.js";
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+export const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
 export const DEFAULT_MODEL = process.env.JUDGE_MODEL ?? "claude-opus-5-5";
 export const DEFAULT_EFFORT = (process.env.JUDGE_EFFORT ?? "medium") as Effort;
+export const MAX_TOKENS = 16000; // thinking is on for Opus 5.5 and counts against this
 
 export const VERDICT_SCHEMA = {
   type: "object",
@@ -34,14 +40,36 @@ const OUTPUT_INSTRUCTIONS =
   'Return a JSON object: {"label": "PASS" or "FAIL", "critique": "..."}. The critique is one sentence naming ' +
   "the specific part of the response that decided the label. When in doubt, FAIL and say why.";
 
-/** USD per million tokens, for the per-run budget estimate only. */
-export const PRICES: Record<string, [number, number]> = {
-  "claude-opus-5-5": [4.0, 20.0],
-  "claude-sonnet-5-5": [2.0, 10.0],
-  "claude-haiku-5-5": [0.1, 0.5],
+/**
+ * USD per million tokens: [input, output, cache read]. Cache writes bill at
+ * 1.25x input. Used only for the budget estimate. Includes the models that
+ * `fallbacks: "default"` can route to. Check current prices at
+ * https://platform.claude.com/docs/en/about-claude/pricing before relying on it.
+ */
+export const PRICES: Record<string, [number, number, number]> = {
+  "claude-opus-5-5": [4.0, 20.0, 0.2],
+  "claude-sonnet-5-5": [2.0, 10.0, 0.1],
+  "claude-haiku-5-5": [0.1, 0.5, 0.01],
+  "claude-opus-5": [5.0, 25.0, 0.5],
+  "claude-opus-4-8": [5.0, 25.0, 0.5],
+  "claude-sonnet-5": [2.0, 10.0, 0.2],
+  "claude-fable-5-2": [8.0, 40.0, 0.2],
+  "claude-fable-5-1": [10.0, 50.0, 1.0],
 };
+/** A model missing from the table is charged at the most expensive known rate. */
+const WORST = Object.values(PRICES).reduce((a, b) => (b[1] > a[1] ? b : a));
 
-export class JudgeError extends Error {}
+/** Statuses that fail one row after the SDK's own retries; anything else would fail every row. */
+const ROW_LEVEL_STATUSES = new Set([408, 409, 413, 422, 429]);
+
+export class JudgeError extends Error {
+  constructor(
+    message: string,
+    readonly costUsd = 0,
+  ) {
+    super(message);
+  }
+}
 
 export interface Verdict {
   label: Label;
@@ -65,14 +93,19 @@ export function makeConfig(rubric: string, overrides: Partial<JudgeConfig> = {})
   return { rubric, model: DEFAULT_MODEL, effort: DEFAULT_EFFORT, fewShots: [], ...overrides };
 }
 
+const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
 export function describe(config: JudgeConfig) {
   return {
     model: config.model,
     effort: config.effort,
-    rubric_sha256: createHash("sha256").update(config.rubric).digest("hex"),
+    prompt_sha256: sha256(JSON.stringify({ max_tokens: MAX_TOKENS, schema: VERDICT_SCHEMA, system: renderSystem(config) })),
+    rubric_sha256: sha256(config.rubric),
     few_shot_ids: config.fewShots.map((r) => r.id),
   };
 }
+
+export const priceKnown = (model: string) => model in PRICES;
 
 const byId = (a: Row, b: Row) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
@@ -112,13 +145,33 @@ export function renderUser(row: Row): string {
   return "Grade this response.\n\n<query>" + row.query + "</query>\n\n<response>" + row.response + "</response>";
 }
 
-export function estimateCost(model: string, usage: Anthropic.Beta.Messages.BetaUsage | undefined): number {
-  const price = PRICES[model];
-  if (!price || !usage) return 0;
-  const [pin, pout] = price;
+interface TokenCounts {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+}
+
+function costOf(model: string | null | undefined, usage: TokenCounts): number {
+  const [pin, pout, pread] = PRICES[model ?? ""] ?? WORST;
   const written = usage.cache_creation_input_tokens ?? 0;
   const read = usage.cache_read_input_tokens ?? 0;
-  return (usage.input_tokens * pin + written * pin * 1.25 + read * pin * 0.1 + usage.output_tokens * pout) / 1e6;
+  return (usage.input_tokens * pin + written * pin * 1.25 + read * pread + usage.output_tokens * pout) / 1e6;
+}
+
+/**
+ * Price each model call in the response at the model that made it. With
+ * fallbacks, one response can hold several calls, listed in usage.iterations.
+ */
+export function estimateCost(requestedModel: string, usage: Anthropic.Beta.Messages.BetaUsage | undefined): number {
+  if (!usage) return 0;
+  const priced = (usage.iterations ?? []).filter(
+    (it): it is Extract<typeof it, TokenCounts> => typeof (it as Partial<TokenCounts>).input_tokens === "number",
+  );
+  if (priced.length > 0) {
+    return priced.reduce((sum, it) => sum + costOf(("model" in it ? (it.model as string | null) : null) ?? requestedModel, it), 0);
+  }
+  return costOf(requestedModel, usage);
 }
 
 /** Calls Claude once per row. Pass `client` to point it at a stub in tests. */
@@ -128,51 +181,55 @@ export function claudeJudge(config: JudgeConfig, client: Anthropic = new Anthrop
     let response: Anthropic.Beta.Messages.BetaMessage;
     try {
       response = await client.beta.messages.create({
-      model: config.model,
-      max_tokens: 16000, // thinking is on for Opus 5.5 and counts against this
-      // If Claude declines on a safety classifier, rerun on a fallback model in
-      // the same call. A rescued verdict comes from a different judge than the
-      // one you calibrated, so it is flagged below.
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
-      output_config: { effort: config.effort, format: { type: "json_schema", schema: VERDICT_SCHEMA } },
-      // The rubric and few-shots are the same on every call, so cache them.
-      system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
-      messages: [{ role: "user", content: renderUser(row) }],
+        model: config.model,
+        max_tokens: MAX_TOKENS,
+        // If Claude declines on a safety classifier, rerun on a fallback model in
+        // the same call. A rescued verdict comes from a different judge than the
+        // one you calibrated, so it is flagged below.
+        betas: ["server-side-fallback-2026-07-01"],
+        fallbacks: "default",
+        output_config: { effort: config.effort, format: { type: "json_schema", schema: VERDICT_SCHEMA } },
+        // The rubric and few-shots are the same on every call, so cache them.
+        system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: renderUser(row) }],
       });
     } catch (err) {
-      // Rate limits, server errors and lost connections fail this row after the
-      // SDK's retries. Anything else (bad key, unknown model, bad request) would
-      // fail every row, so it stops the run.
       if (err instanceof Anthropic.APIConnectionError) throw new JudgeError(row.id + ": connection failed after retries");
-      if (err instanceof Anthropic.APIError && (err.status === 429 || (err.status ?? 0) >= 500)) {
+      if (err instanceof Anthropic.APIError && err.status !== undefined && (ROW_LEVEL_STATUSES.has(err.status) || err.status >= 500)) {
         throw new JudgeError(row.id + ": HTTP " + err.status + " after retries");
       }
       throw err;
     }
+    // Charge the call before deciding whether it produced a verdict: a refusal
+    // or a truncated answer still costs money.
+    const cost = estimateCost(config.model, response.usage);
     if (response.stop_reason === "refusal") {
       const category = response.stop_details?.category ?? "none";
-      throw new JudgeError(row.id + ": the judge declined (category: " + category + ")");
+      throw new JudgeError(row.id + ": the judge declined (category: " + category + ")", cost);
     }
-    if (response.stop_reason === "max_tokens") throw new JudgeError(row.id + ": the judge hit max_tokens");
+    if (response.stop_reason === "max_tokens") throw new JudgeError(row.id + ": the judge hit max_tokens", cost);
     const block = response.content.find((b): b is Anthropic.Beta.Messages.BetaTextBlock => b.type === "text");
-    if (!block) throw new JudgeError(row.id + ": no text block in the judge response");
-    let data: { label?: unknown; critique?: unknown };
+    if (!block) throw new JudgeError(row.id + ": no text block in the judge response", cost);
+    let data: unknown;
     try {
-      data = JSON.parse(block.text) as { label?: unknown; critique?: unknown };
+      data = JSON.parse(block.text);
     } catch {
-      throw new JudgeError(row.id + ": judge output is not JSON: " + block.text.slice(0, 200));
+      throw new JudgeError(row.id + ": judge output is not JSON: " + block.text.slice(0, 200), cost);
     }
-    const label = String(data.label ?? "").toUpperCase();
-    if (label !== "PASS" && label !== "FAIL") throw new JudgeError(row.id + ": unexpected label " + String(data.label));
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      throw new JudgeError(row.id + ": judge output is not a JSON object: " + block.text.slice(0, 200), cost);
+    }
+    const verdict = data as { label?: unknown; critique?: unknown };
+    const label = String(verdict.label ?? "").toUpperCase();
+    if (label !== "PASS" && label !== "FAIL") throw new JudgeError(row.id + ": unexpected label " + String(verdict.label), cost);
     const servedBy = response.model ?? config.model;
     const fallbackRan = (response.usage.iterations ?? []).some((it) => it.type === "fallback_message");
     return {
       label,
-      critique: String(data.critique ?? ""),
+      critique: String(verdict.critique ?? ""),
       model: servedBy,
       fallbackUsed: fallbackRan || servedBy !== config.model,
-      costUsd: estimateCost(servedBy, response.usage),
+      costUsd: cost,
     };
   };
 }

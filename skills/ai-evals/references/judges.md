@@ -60,8 +60,8 @@ run dev twice and count flipped labels before you trust a small change.
 ## Calibration against human labels
 
 1. Get human labels. Target 100 to 200 per failure mode (Hamel and Shankar FAQ). The guide
-   says at least 100, and 200 is more honest; below 100 you're tuning to noise, and below
-   about 60 the intervals are too wide to conclude anything.
+   says at least 100, and 200 is more honest; below 100 you're tuning to noise. Hamel
+   warns that below roughly 60 the intervals are too wide to support any conclusion.
 2. Check the humans first. Two experts double-label about 50 items; compute Cohen's kappa
    (two raters) or Krippendorff's alpha (more than two). Don't proceed below 0.6; use 0.8
    or higher for a gold set or a release gate. The guide calls these cutoffs team policy,
@@ -78,8 +78,13 @@ run dev twice and count flipped labels before you trust a small change.
 6. Stop when PASS and FAIL recall are both at least 0.90 on dev and judge-human kappa is at
    least 0.6 (this site's default bar, not Hamel's; set yours from the cost of a missed
    failure versus a false alarm). Then read test once and keep that number. If test is
-   more than 5 points below dev, the dev set isn't representative: label more.
-7. If about three iterations don't reach the bar, the rubric is the bug.
+   more than 5 points away from dev in either direction, the dev set isn't representative:
+   label more.
+7. Expect a plateau around the second or third iteration. Add edge-case few-shots next: two
+   PASS examples that look like FAIL on a careless read, and two FAIL examples that look like
+   PASS. If FAIL recall still doesn't move about five points, the model may be the ceiling:
+   try a stronger judge before changing the rubric again, and calibrate it from scratch
+   (https://www.aievals.co/cookbook/llm-judge-calibration).
 
 **Naming.** With PASS as the positive class, PASS recall is the TPR and FAIL recall is the
 TNR. Hamel's FAQ treats FAIL as positive, so its TPR is the share of real failures the

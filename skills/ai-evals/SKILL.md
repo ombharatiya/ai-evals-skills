@@ -78,8 +78,9 @@ Follow these in every eval task, whatever the user asked for.
 4. **Write code checks** for every remaining mode a rule can detect.
 5. **Write one judge per remaining subjective mode** (Workflow B).
 6. **Get human labels**: 100 to 200 per failure mode is the target, with 30 to 50 PASS and
-   30 to 50 FAIL in each of dev and test. Start with what you have and say how wide the
-   intervals are.
+   30 to 50 FAIL in each of dev and test. A 40% dev split of 100 rows can't hold 30 of each
+   class, and at a low failure rate you have to oversample failures to fill the FAIL side.
+   Start with what you have and say how wide the intervals are.
 7. **Calibrate** each judge on dev, then confirm on test once.
 8. **Build the regression set** from reproduced failures, and wire the suite into CI
    (Workflow E).
@@ -116,10 +117,13 @@ writing the harness from scratch.
    wrong, fix the label, not the rubric.
 4. Change one thing per iteration, in this order of typical impact: rubric specificity,
    few-shot examples, output schema, and model swap last.
-5. Stop when PASS and FAIL recall both reach the bar on dev (this guide's default is 0.90;
+5. Expect a plateau around the second or third iteration. Then add few-shots for the edge
+   cases: two PASS examples that look like FAIL on a careless read and two FAIL examples
+   that look like PASS. If FAIL recall still doesn't move, the judge model may be the
+   ceiling: try a stronger one before changing the rubric again, and treat the new model
+   as a new instrument to calibrate from scratch.
+6. Stop when PASS and FAIL recall both reach the bar on dev (this guide's default is 0.90;
    set it from the cost of a missed failure versus a false alarm), then read test once.
-   If about three iterations don't get there, the rubric is the problem: split it or
-   redefine the failure mode.
 
 ### Workflow C: audit an existing eval
 
@@ -179,15 +183,15 @@ own working number, not a published standard.
 
 | Decision | Default | Source |
 |---|---|---|
-| First error-analysis pass | 100+ traces, 15 to 45 seconds each, first failure only | Hamel and Shankar FAQ |
+| First error-analysis pass | 100+ traces, first failure only (Hamel and Shankar FAQ); 15 to 45 seconds each | FAQ, and aievals.co for the pace |
 | Failure-mode categories | 4 to 7 after axial coding | aievals.co open-coding guide |
 | Labels per failure mode | 100 to 200 | Hamel and Shankar FAQ |
-| Split | 15% train, 40% dev, 45% test, stratified | aievals.co calibration recipe |
+| Split | 15% train, 40% dev, 45% test, stratified; a row never changes split as labels are added | aievals.co calibration recipe |
 | Per class in dev and in test | 30 to 50 PASS and 30 to 50 FAIL | Hamel and Shankar FAQ |
 | Judge recall bar | PASS and FAIL recall at least 0.90 on dev, confirmed on test | site default |
 | Human agreement before automating | kappa at least 0.6 to proceed, 0.8 for a gold set or gate | team policy, per the guide |
 | Interval for a rate | Wilson, 95% | aievals.co statistics chapter |
-| Release-gate quality window | 2 points on the primary metric | site default |
+| Release-gate windows | 1-point indifference window; 2-point minor-regression window on the primary metric | aievals.co release-gates chapter |
 | Regression set | 100% pass on every PR | aievals.co regression-sets chapter |
 
 ## References

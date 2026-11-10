@@ -1,9 +1,19 @@
 /**
  * Compare a candidate run with a baseline: ship, hold, investigate or block.
- * The bands follow the release-gates chapter on aievals.co and read the
- * interval on the paired difference in pass rate, not the absolute rate.
+ *
+ * The bands and band() follow the release-gates chapter on aievals.co
+ * (https://www.aievals.co/learn/production/release-gates). They read the
+ * interval on the paired difference in pass rate, not the absolute rate:
+ * ship when the interval sits above zero or inside the indifference window
+ * (default 1 point); hold when it contains zero and reaches outside it;
+ * investigate when it sits below zero and the drop is within the
+ * minor-regression window (default 2 points); block when the drop is larger.
+ *
+ * The interval is Newcombe's score interval for a paired difference of
+ * proportions (Newcombe 1998, method 10). It stays wide when the two runs
+ * agree on every row, so a tiny comparison can't ship on a [0, 0] interval.
  */
-import { seededRandom } from "./data.js";
+import { wilson } from "./metrics.js";
 
 export interface Delta {
   n: number;
@@ -11,45 +21,75 @@ export interface Delta {
   candidate_rate: number;
   delta: number;
   ci: [number, number];
+  both_pass: number;
+  baseline_only: number;
+  candidate_only: number;
+  both_fail: number;
 }
 
-/** Paired bootstrap interval on candidate pass rate minus baseline pass rate. */
-export function pairedDelta(
-  baseline: Map<string, boolean>,
-  candidate: Map<string, boolean>,
-  reps = 2000,
-  seed = 0,
-): Delta {
+/**
+ * Difference p_candidate - p_baseline and its interval from paired counts:
+ * a = both pass, b = baseline passes and candidate fails,
+ * c = baseline fails and candidate passes, d = both fail.
+ */
+export function newcombePaired(a: number, b: number, c: number, d: number, z = 1.96): [number, number, number] {
+  const n = a + b + c + d;
+  if (n === 0) throw new Error("no paired rows");
+  const pBase = (a + b) / n;
+  const pCand = (a + c) / n;
+  const [loBase, hiBase] = wilson(a + b, n, z);
+  const [loCand, hiCand] = wilson(a + c, n, z);
+  const denom = Math.sqrt((a + b) * (c + d) * (a + c) * (b + d));
+  let phi = 0;
+  if (denom > 0) {
+    // Newcombe's continuity-adjusted correlation for method 10.
+    let num = a * d - b * c;
+    if (num > 0) num = Math.max(num - n / 2, 0);
+    phi = num / denom;
+  }
+  const delta = pCand - pBase;
+  const down = Math.sqrt(Math.max(0, (pCand - loCand) ** 2 - 2 * phi * (pCand - loCand) * (hiBase - pBase) + (hiBase - pBase) ** 2));
+  const up = Math.sqrt(Math.max(0, (hiCand - pCand) ** 2 - 2 * phi * (hiCand - pCand) * (pBase - loBase) + (pBase - loBase) ** 2));
+  return [delta, Math.max(-1, delta - down), Math.min(1, delta + up)];
+}
+
+/** Pair the runs on their shared ids. The caller reports ids that didn't pair. */
+export function pairedDelta(baseline: Map<string, boolean>, candidate: Map<string, boolean>): Delta {
   const ids = [...baseline.keys()].filter((id) => candidate.has(id)).sort();
   if (ids.length === 0) throw new Error("baseline and candidate share no ids");
-  const diffs = ids.map((id) => Number(candidate.get(id)) - Number(baseline.get(id)));
-  const n = diffs.length;
-  const rand = seededRandom(seed);
-  const means: number[] = [];
-  for (let r = 0; r < reps; r++) {
-    let sum = 0;
-    for (let i = 0; i < n; i++) sum += diffs[Math.floor(rand() * n)]!;
-    means.push(sum / n);
+  let a = 0;
+  let b = 0;
+  let c = 0;
+  for (const id of ids) {
+    const base = baseline.get(id)!;
+    const cand = candidate.get(id)!;
+    if (base && cand) a++;
+    else if (base) b++;
+    else if (cand) c++;
   }
-  means.sort((a, b) => a - b);
-  const lo = means[Math.floor(0.025 * reps)]!;
-  const hi = means[Math.min(reps - 1, Math.floor(0.975 * reps))]!;
-  const rate = (m: Map<string, boolean>) => ids.filter((id) => m.get(id)).length / n;
+  const d = ids.length - a - b - c;
+  const [delta, lo, hi] = newcombePaired(a, b, c, d);
+  const n = ids.length;
   return {
     n,
-    baseline_rate: rate(baseline),
-    candidate_rate: rate(candidate),
-    delta: diffs.reduce((a, b) => a + b, 0) / n,
+    baseline_rate: (a + b) / n,
+    candidate_rate: (a + c) / n,
+    delta,
     ci: [lo, hi],
+    both_pass: a,
+    baseline_only: b,
+    candidate_only: c,
+    both_fail: d,
   };
 }
 
 export type Band = "ship" | "hold" | "investigate" | "block";
 
-export function band(delta: Delta, window = 0.02): Band {
+/** The guide's gate(): decide a band from the delta and its interval. */
+export function band(delta: Delta, indifference = 0.01, minorRegression = 0.02): Band {
   const [lo, hi] = delta.ci;
-  // A regression the interval is sure of comes first, even a small one.
-  if (hi < 0) return lo >= -window ? "investigate" : "block";
-  if (lo > 0 || (lo >= -window && hi <= window)) return "ship";
+  if (hi < 0) return -delta.delta > minorRegression ? "block" : "investigate";
+  if (lo > 0) return "ship";
+  if (Math.max(Math.abs(lo), Math.abs(hi)) <= indifference) return "ship";
   return "hold";
 }

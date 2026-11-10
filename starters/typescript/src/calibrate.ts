@@ -3,20 +3,27 @@
  *
  *   npm run calibrate -- --data data/labeled.example.jsonl --rubric rubrics/refund_policy.md
  *
- * Splits the labeled set into train / dev / test (stratified, seeded), builds
- * few-shots from train, runs the judge on dev, and reports PASS recall, FAIL
- * recall, Cohen's kappa and agreement with N. Read the disagreements, edit the
- * rubric, run again. When dev clears the bar, run once with `--split test`
- * and keep that number.
+ * Splits the labeled set into train / dev / test by a stable hash of each id,
+ * builds few-shots from train, runs the judge on dev, and reports PASS recall,
+ * FAIL recall, Cohen's kappa and agreement with N. Read the disagreements,
+ * edit the rubric, run again. When dev clears the bar, run once with
+ * `--split test` and keep that number.
+ *
+ * The bar: every split row gets a verdict, each class has at least
+ * --min-per-class rows, PASS and FAIL recall reach --min-recall, and kappa
+ * reaches --min-kappa.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { loadJsonl, stratifiedSplit, writeJsonl, type Label, type Row } from "./data.js";
-import { claudeJudge, describe, makeConfig, pickFewShots, setupProblem, type Effort, type Judge, type JudgeConfig } from "./judge.js";
+import { isMain, numberFlag } from "./cli.js";
+import { classCounts, dumps, fileSha256, loadJsonl, splitRows, writeJsonl, type Label, type Row } from "./data.js";
+import { EFFORTS, claudeJudge, describe, makeConfig, pickFewShots, priceKnown, setupProblem, type Effort, type Judge, type JudgeConfig } from "./judge.js";
 import { judgeReport } from "./metrics.js";
 import { Budget, judgeRows } from "./runner.js";
+
+export const TRAIN_FRACTION = 0.15;
+export const DEV_FRACTION = 0.4;
 
 export async function calibrate(opts: {
   rows: Row[];
@@ -28,12 +35,13 @@ export async function calibrate(opts: {
   repeats?: number;
   workers?: number;
   budget?: Budget;
+  dataset?: Record<string, unknown>;
 }) {
-  const { rows, judge, config, splitName, splitRows, outDir } = opts;
+  const { rows, judge, config, splitName, splitRows: part, outDir } = opts;
   const repeats = opts.repeats ?? 1;
   const budget = opts.budget ?? new Budget();
   const runs = [];
-  for (let i = 0; i < repeats; i++) runs.push(await judgeRows(judge, splitRows, opts.workers ?? 4, budget));
+  for (let i = 0; i < repeats; i++) runs.push(await judgeRows(judge, part, opts.workers ?? 4, budget));
   const first = runs[0]!;
   const scored = first.filter((o) => o.verdict);
   const report = judgeReport(
@@ -66,7 +74,10 @@ export async function calibrate(opts: {
     date: new Date().toISOString(),
     split: splitName,
     judge: describe(config),
+    dataset: opts.dataset ?? {},
     dataset_rows: rows.length,
+    split_rows: part.length,
+    split_class_counts: classCounts(part),
     report,
     errors: first.filter((o) => o.error).length,
     fallback_verdicts: scored.filter((o) => o.verdict!.fallbackUsed).length,
@@ -76,15 +87,29 @@ export async function calibrate(opts: {
   };
 
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
+  writeFileSync(join(outDir, "summary.json"), dumps(summary, 2) + "\n");
   writeFileSync(join(outDir, "rubric.md"), config.rubric);
   writeJsonl(join(outDir, "predictions.jsonl"), predictions);
-  writeJsonl(join(outDir, "disagreements.jsonl"), disagreements);
+  // Test disagreements are left out on purpose: reading them invites tuning on test.
+  if (splitName === "dev") writeJsonl(join(outDir, "disagreements.jsonl"), disagreements);
   return summary;
 }
 
-const f = (x: number) => x.toFixed(3);
-const ci = (pair: [number, number]) => "[" + pair[0].toFixed(2) + ", " + pair[1].toFixed(2) + "]";
+export function barFailures(summary: Awaited<ReturnType<typeof calibrate>>, minRecall: number, minKappa: number, minPerClass: number): string[] {
+  const r = summary.report;
+  const reasons: string[] = [];
+  if (summary.errors) reasons.push(summary.errors + " rows got no verdict (see predictions.jsonl)");
+  for (const [label, n] of Object.entries(summary.split_class_counts)) {
+    if (n < minPerClass) reasons.push("only " + n + " " + label + " rows in this split; the bar needs " + minPerClass + " per class");
+  }
+  if (!(r.pass_recall >= minRecall)) reasons.push("pass recall below " + minRecall.toFixed(2));
+  if (!(r.fail_recall >= minRecall)) reasons.push("fail recall below " + minRecall.toFixed(2));
+  if (!(r.kappa >= minKappa)) reasons.push("kappa below " + minKappa.toFixed(2));
+  return reasons;
+}
+
+const f = (x: number) => (Number.isFinite(x) ? x.toFixed(3) : "n/a");
+const ci = (pair: [number, number]) => (Number.isFinite(pair[0]) ? "[" + pair[0].toFixed(2) + ", " + pair[1].toFixed(2) + "]" : "[n/a]");
 
 async function main(): Promise<number> {
   const { values } = parseArgs({
@@ -98,6 +123,7 @@ async function main(): Promise<number> {
       workers: { type: "string", default: "4" },
       "min-recall": { type: "string", default: "0.90" },
       "min-kappa": { type: "string", default: "0.60" },
+      "min-per-class": { type: "string", default: "30" },
       model: { type: "string" },
       effort: { type: "string" },
       out: { type: "string", default: "runs" },
@@ -107,49 +133,84 @@ async function main(): Promise<number> {
     console.error("usage: npm run calibrate -- --data <labeled.jsonl> --rubric <rubric.md> [--split dev|test]");
     return 2;
   }
-  const split = values.split === "test" ? "test" : "dev";
+  let opts;
+  try {
+    if (values.split !== "dev" && values.split !== "test") throw new Error("--split must be dev or test, got " + values.split);
+    if (values.effort && !EFFORTS.includes(values.effort as Effort)) throw new Error("--effort must be one of " + EFFORTS.join(", "));
+    opts = {
+      split: values.split as "dev" | "test",
+      seed: numberFlag("seed", values.seed, { integer: true }),
+      fewShots: numberFlag("few-shots", values["few-shots"], { integer: true, min: 0 }),
+      repeats: numberFlag("repeats", values.repeats, { integer: true, min: 1 }),
+      workers: numberFlag("workers", values.workers, { integer: true, min: 1 }),
+      minRecall: numberFlag("min-recall", values["min-recall"], { min: 0 }),
+      minKappa: numberFlag("min-kappa", values["min-kappa"]),
+      minPerClass: numberFlag("min-per-class", values["min-per-class"], { integer: true, min: 0 }),
+      budget: Budget.fromEnv(),
+    };
+  } catch (err) {
+    console.error((err as Error).message);
+    return 2;
+  }
   const rows = loadJsonl(values.data, true);
-  const [train, dev, test] = stratifiedSplit(rows, Number(values.seed));
+  const [train, dev, test] = splitRows(rows, opts.seed, TRAIN_FRACTION, DEV_FRACTION);
   const config = makeConfig(readFileSync(values.rubric, "utf8"), {
     ...(values.model ? { model: values.model } : {}),
     ...(values.effort ? { effort: values.effort as Effort } : {}),
   });
-  config.fewShots = pickFewShots(train, Number(values["few-shots"]));
-  if (split === "test") console.log("Reading the test split. Do this once, after dev clears the bar; keep this number.");
+  config.fewShots = pickFewShots(train, opts.fewShots);
+  if (opts.budget.limitUsd !== null && !priceKnown(config.model)) {
+    console.error("EVAL_BUDGET_USD is set but there's no price for " + config.model + " in src/judge.ts PRICES.");
+    return 2;
+  }
+  if (opts.split === "test") console.log("Reading the test split. Do this once, after dev clears the bar; keep this number.");
 
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
-  const outDir = join(values.out!, stamp + "-calibrate-" + split);
+  const outDir = join(values.out!, stamp + "-calibrate-" + opts.split);
   const summary = await calibrate({
     rows,
     judge: claudeJudge(config),
     config,
-    splitName: split,
-    splitRows: split === "dev" ? dev : test,
+    splitName: opts.split,
+    splitRows: opts.split === "dev" ? dev : test,
     outDir,
-    repeats: Number(values.repeats),
-    workers: Number(values.workers),
-    budget: Budget.fromEnv(),
+    repeats: opts.repeats,
+    workers: opts.workers,
+    budget: opts.budget,
+    dataset: {
+      path: values.data,
+      sha256: fileSha256(values.data),
+      seed: opts.seed,
+      fractions: { train: TRAIN_FRACTION, dev: DEV_FRACTION, test: Number((1 - TRAIN_FRACTION - DEV_FRACTION).toFixed(2)) },
+      few_shots: opts.fewShots,
+    },
   });
 
   const r = summary.report;
   const c = r.confusion;
-  console.log("split=" + split + "  n=" + r.n + "  train/dev/test=" + [train, dev, test].map((x) => x.length).join("/") + "  judge=" + config.model + "@" + config.effort);
-  console.log("  PASS recall (TPR) " + f(r.pass_recall) + "  95% CI " + ci(r.pass_recall_ci) + "  n=" + (c.tp + c.fn));
-  console.log("  FAIL recall (TNR) " + f(r.fail_recall) + "  95% CI " + ci(r.fail_recall_ci) + "  n=" + (c.tn + c.fp));
+  const counts = summary.split_class_counts;
+  console.log("split=" + opts.split + "  n=" + r.n + "  train/dev/test=" + [train, dev, test].map((x) => x.length).join("/") + "  judge=" + config.model + "@" + config.effort);
+  console.log("  PASS recall (TPR) " + f(r.pass_recall) + "  95% CI " + ci(r.pass_recall_ci) + "  n=" + (c.tp + c.fn) + " of " + counts.PASS + " PASS rows");
+  console.log("  FAIL recall (TNR) " + f(r.fail_recall) + "  95% CI " + ci(r.fail_recall_ci) + "  n=" + (c.tn + c.fp) + " of " + counts.FAIL + " FAIL rows");
   console.log("  kappa " + f(r.kappa) + "   agreement " + f(r.agreement) + " (not the headline)");
   console.log("  confusion TP=" + c.tp + " FN=" + c.fn + " FP=" + c.fp + " TN=" + c.tn);
-  if (summary.errors) console.log("  " + summary.errors + " rows had no verdict; see predictions.jsonl");
   if (summary.fallback_verdicts) console.log("  " + summary.fallback_verdicts + " verdicts came from a fallback model, not the calibrated judge");
   if (summary.label_flips_across_repeats) console.log("  " + summary.label_flips_across_repeats + " labels flipped between repeats: treat small moves as noise");
-  console.log("  wrote " + outDir);
+  console.log("  estimated cost $" + summary.estimated_cost_usd.toFixed(2) + "   wrote " + outDir);
 
-  const ok = r.pass_recall >= Number(values["min-recall"]) && r.fail_recall >= Number(values["min-recall"]) && r.kappa >= Number(values["min-kappa"]);
-  if (ok && split === "dev") console.log("Dev clears the bar. Run once with --split test and keep that number.");
-  else if (!ok) console.log("Not there yet. Read disagreements.jsonl, change one thing in the rubric, run again.");
-  return ok ? 0 : 1;
+  const reasons = barFailures(summary, opts.minRecall, opts.minKappa, opts.minPerClass);
+  if (reasons.length === 0 && opts.split === "dev") console.log("Dev clears the bar. Run once with --split test and keep that number.");
+  else if (reasons.length === 0) console.log("Test clears the bar. This is the judge's calibration record; keep summary.json.");
+  else {
+    console.log("Not there yet:");
+    for (const reason of reasons) console.log("  - " + reason);
+    if (opts.split === "dev") console.log("Read disagreements.jsonl, change one thing in the rubric (or label more rows), run again.");
+    else console.log("Don't tune on test. Label fresh rows, calibrate on dev again, then read test once more on the new rows.");
+  }
+  return reasons.length === 0 ? 0 : 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMain(import.meta.url)) {
   main().then(
     (code) => process.exit(code),
     (err: unknown) => {

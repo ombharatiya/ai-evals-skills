@@ -1,6 +1,8 @@
+from types import SimpleNamespace
+
 import pytest
 
-from evals.judge import ClaudeJudge, JudgeConfig, JudgeError, pick_few_shots, render_system
+from evals.judge import ClaudeJudge, JudgeConfig, JudgeError, estimate_cost, pick_few_shots, render_system
 from tests.fakes import StubClient, message, verdict_json
 
 ROW = {"id": "t-1", "query": "Refund after 60 days?", "response": "Yes, within 90 days."}
@@ -25,27 +27,34 @@ def test_request_shape_pins_the_judge():
     assert "Refund after 60 days?" in req["messages"][0]["content"]
 
 
-def test_refusal_and_truncation_raise_instead_of_guessing():
+def test_unusable_answers_raise_and_still_carry_their_cost():
     for response in (message(None, stop_reason="refusal"), message(None, stop_reason="max_tokens"),
-                     message("not json"), message(verdict_json("MAYBE"))):
+                     message("not json"), message(verdict_json("MAYBE")), message("[1, 2]"), message("null")):
         judge, _ = judge_with(response)
-        with pytest.raises(JudgeError):
+        with pytest.raises(JudgeError) as exc:
             judge(ROW)
+        assert exc.value.cost_usd > 0
 
 
-def test_fallback_verdict_is_flagged():
-    from types import SimpleNamespace
-
-    judge, _ = judge_with(message(verdict_json("PASS"), model="claude-opus-4-8",
-                                  iterations=[SimpleNamespace(type="fallback_message")]))
+def test_fallback_verdict_is_flagged_and_priced_per_call():
+    iterations = [
+        SimpleNamespace(type="message", model=None, input_tokens=1000, output_tokens=0,
+                        cache_creation_input_tokens=0, cache_read_input_tokens=0),
+        SimpleNamespace(type="fallback_message", model="claude-opus-4-8", input_tokens=1000, output_tokens=400,
+                        cache_creation_input_tokens=0, cache_read_input_tokens=0),
+    ]
+    judge, _ = judge_with(message(verdict_json("PASS"), model="claude-opus-4-8", iterations=iterations))
     verdict = judge(ROW)
     assert verdict.fallback_used and verdict.model == "claude-opus-4-8"
+    # First call at Opus 5.5 input price, the rescue at Opus 4.8 prices.
+    assert verdict.cost_usd == pytest.approx((1000 * 4) / 1e6 + (1000 * 5 + 400 * 25) / 1e6)
 
 
-def test_cost_estimate_uses_the_price_table():
-    judge, _ = judge_with(message(verdict_json("PASS")))
-    # 1000 input at $4/M + 400 output at $20/M
-    assert abs(judge(ROW).cost_usd - (1000 * 4 + 400 * 20) / 1e6) < 1e-12
+def test_cost_uses_the_price_table_and_charges_unknown_models_at_the_top_rate():
+    usage = SimpleNamespace(input_tokens=1000, output_tokens=400, cache_creation_input_tokens=0,
+                            cache_read_input_tokens=1000, iterations=None)
+    assert estimate_cost("claude-opus-5-5", usage) == pytest.approx((1000 * 4 + 1000 * 0.20 + 400 * 20) / 1e6)
+    assert estimate_cost("some-new-model", usage) > estimate_cost("claude-opus-5-5", usage)
 
 
 def test_few_shots_are_balanced_and_prefer_critiques():
@@ -61,7 +70,11 @@ def test_few_shots_are_balanced_and_prefer_critiques():
     assert "<explanation>wrong window</explanation>" in system and system.count("<example>") == 3
 
 
-def test_describe_changes_when_the_rubric_changes():
-    a = JudgeConfig(rubric="one").describe()
-    b = JudgeConfig(rubric="two").describe()
-    assert a["rubric_sha256"] != b["rubric_sha256"]
+def test_fingerprint_changes_with_any_prompt_change():
+    shot = {"id": "f1", "query": "q", "response": "r", "label": "FAIL", "critique": "old"}
+    a = JudgeConfig(rubric="R", few_shots=[shot]).describe()
+    b = JudgeConfig(rubric="R", few_shots=[{**shot, "critique": "new"}]).describe()
+    c = JudgeConfig(rubric="R2", few_shots=[shot]).describe()
+    assert a["few_shot_ids"] == b["few_shot_ids"]  # same ids...
+    assert a["prompt_sha256"] != b["prompt_sha256"] != c["prompt_sha256"]  # ...different prompt
+    assert JudgeConfig(rubric="R", few_shots=[shot]).describe() == a

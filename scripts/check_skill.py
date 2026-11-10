@@ -5,7 +5,7 @@
 - Only fields that every Agent Skills host accepts are used.
 - SKILL.md stays under 500 lines.
 - Every relative markdown link in the skill and the rules points at a file that exists.
-- No em dashes or curly quotes (house style).
+- No em dashes, curly quotes or other typographic characters in any markdown file.
 """
 import re
 import sys
@@ -36,7 +36,7 @@ else:
 if len(text.splitlines()) >= 500:
     errors.append("SKILL.md: keep it under 500 lines")
 
-files = list(SKILL_DIR.rglob("*.md")) + list((ROOT / "rules").rglob("*.md*")) + [ROOT / "README.md"]
+files = sorted(p for p in ROOT.rglob("*.md*") if "node_modules" not in p.parts and ".git" not in p.parts)
 for path in files:
     body = path.read_text(encoding="utf-8")
     for target in re.findall(r"\]\(([^)#]+)\)", body):
@@ -45,7 +45,8 @@ for path in files:
         if not (path.parent / target).resolve().exists():
             errors.append(f"{path.relative_to(ROOT)}: broken link {target}")
     banned = {0x2014: "em dash", 0x2013: "en dash", 0x201C: "curly quote", 0x201D: "curly quote",
-              0x2018: "curly apostrophe", 0x2019: "curly apostrophe"}
+              0x2018: "curly apostrophe", 0x2019: "curly apostrophe", 0x2026: "ellipsis character",
+              0x00A0: "non-breaking space"}
     for code, label in banned.items():
         if chr(code) in body:
             errors.append(f"{path.relative_to(ROOT)}: contains an {label}")

@@ -29,9 +29,9 @@ explain a choice.
    paired data.
 9. The regression set (reproduced bugs, policy boundaries) passes 100% on every PR.
 10. Gate releases on the interval of the paired difference: ship if it sits above zero or
-    inside a 2-point window; hold if it contains zero and reaches outside the window;
-    investigate if it sits below zero within the window; block if it sits below zero and
-    past the window.
+    inside a 1-point indifference window; hold if it contains zero and reaches outside that
+    window; investigate if it sits below zero with a drop within the 2-point
+    minor-regression window; block if the drop is larger.
 11. Enforce a spend cap in the eval runner (`EVAL_BUDGET_USD`).
 12. Build the smallest thing that works: assertions and about 30 labeled examples before a
     judge; a calibrated judge before dashboards or ensembles.

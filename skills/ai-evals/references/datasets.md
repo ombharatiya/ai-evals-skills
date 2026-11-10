@@ -73,10 +73,14 @@ Keep separate sets, because mixing them is the common mistake:
 | Release gate | 200 to 500 | per release, versioned |
 | Error-analysis pool | grows | refreshed continuously |
 
+Outside the regression set, retire evals that stop discriminating: an eval that keeps
+passing tells you less and less, and expensive judge-based ones should go sooner than cheap
+ones (Hamel Husain and Shreya Shankar, https://hamel.dev/blog/posts/evals-faq/).
+
 ## Regression sets
 
-(https://www.aievals.co/learn/datasets/regression-sets; Anthropic, "Demystifying evals for
-AI agents", https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)
+Sources: https://www.aievals.co/learn/datasets/regression-sets and Anthropic, "Demystifying
+evals for AI agents" (https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents).
 
 - 100% pass on every PR. A flaky case is a process failure, not noise.
 - Admit only reproduced production bugs, policy boundaries and hard-won invariants. Leave
@@ -86,8 +90,13 @@ AI agents", https://www.anthropic.com/engineering/demystifying-evals-for-ai-agen
 - Tier it: a smoke tier (the top 30 cases) on every PR, the full set nightly and on release
   candidates, an extended set with adversarial probes weekly.
 - Move cases that have been green for a year to the nightly tier. A capability case
-  graduates into the regression set once it passes consistently. Retire evals that never
-  fail, and retire expensive judge-based ones sooner.
+  graduates into the regression set once it passes consistently.
+- Retire a regression case only when the capability it guards is structurally impossible
+  to break. Regression cases are supposed to pass every time, so never prune them for
+  passing.
+- Give regression cases deterministic checks where you can (in the starters,
+  `must_include`, `must_not_include` and `max_words` on the row). A judge-graded regression
+  case can flip between runs.
 
 ## Coverage grids
 

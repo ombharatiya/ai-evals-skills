@@ -10,7 +10,17 @@ import pytest
 anthropic = pytest.importorskip("anthropic")
 httpx2 = pytest.importorskip("httpx2")
 
-from evals.judge import ClaudeJudge, JudgeConfig  # noqa: E402
+from evals.judge import ClaudeJudge, JudgeConfig, JudgeError  # noqa: E402
+
+ROW = {"id": "t-1", "query": "Refund after 60 days?", "response": "Yes, within 90 days."}
+
+
+def _client(handler):
+    return anthropic.Anthropic(
+        api_key="test-key",
+        http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)),
+        max_retries=0,
+    )
 
 
 def test_real_sdk_round_trip():
@@ -27,14 +37,7 @@ def test_real_sdk_round_trip():
             "usage": {"input_tokens": 900, "output_tokens": 300},
         })
 
-    client = anthropic.Anthropic(
-        api_key="test-key",
-        http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)),
-        max_retries=0,
-    )
-    judge = ClaudeJudge(JudgeConfig(rubric="PASS if correct."), client=client)
-    verdict = judge({"id": "t-1", "query": "Refund after 60 days?", "response": "Yes, within 90 days."})
-
+    verdict = ClaudeJudge(JudgeConfig(rubric="PASS if correct."), client=_client(handler))(ROW)
     assert verdict.label == "FAIL" and not verdict.fallback_used
     body = seen["body"]
     assert seen["url"].endswith("/v1/messages")
@@ -44,26 +47,17 @@ def test_real_sdk_round_trip():
     assert "temperature" not in body
 
 
-def _client(status, body):
-    def handler(request):
-        return httpx2.Response(status, json=body)
-
-    return anthropic.Anthropic(
-        api_key="test-key",
-        http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)),
-        max_retries=0,
-    )
+def _error(status, kind):
+    return lambda request: httpx2.Response(status, json={"type": "error", "error": {"type": kind, "message": "x"}})
 
 
-def test_rate_limit_fails_the_row_not_the_run():
-    from evals.judge import JudgeError
-
-    judge = ClaudeJudge(JudgeConfig(rubric="R"), client=_client(429, {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}}))
-    with pytest.raises(JudgeError, match="429"):
-        judge({"id": "t-1", "query": "q", "response": "r"})
+@pytest.mark.parametrize("status,kind", [(429, "rate_limit_error"), (408, "timeout_error"),
+                                         (413, "request_too_large"), (529, "overloaded_error")])
+def test_transient_errors_fail_the_row_not_the_run(status, kind):
+    with pytest.raises(JudgeError, match=str(status)):
+        ClaudeJudge(JudgeConfig(rubric="R"), client=_client(_error(status, kind)))(ROW)
 
 
 def test_bad_key_stops_the_run():
-    judge = ClaudeJudge(JudgeConfig(rubric="R"), client=_client(401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}}))
     with pytest.raises(anthropic.AuthenticationError):
-        judge({"id": "t-1", "query": "q", "response": "r"})
+        ClaudeJudge(JudgeConfig(rubric="R"), client=_client(_error(401, "authentication_error")))(ROW)

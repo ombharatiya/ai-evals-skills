@@ -7,20 +7,24 @@
  *
  * Code checks run first; a failed check fails the row and skips the judge.
  * The run reports the pass-all rate with a Wilson interval and a per-check
- * drill-down. With --baseline it computes the paired difference and prints
- * ship / hold / investigate / block. Exit code 0 for ship (or a first run
- * with no baseline), 1 otherwise. Rows with "must_pass": true are the
- * regression set: one failure blocks. Rows with no verdict turn a ship into
- * a hold, so nothing passes silently.
+ * drill-down, and writes results.jsonl as soon as scoring finishes. With
+ * --baseline it pairs the runs on shared ids, computes the difference with
+ * Newcombe's paired interval, and prints ship / hold / investigate / block.
+ * Exit code 0 for ship (or a first run with no baseline), 1 otherwise.
+ *
+ * Nothing ships silently: a failing "must_pass" row blocks; rows with no
+ * verdict, ids missing from the baseline, fewer than --min-paired paired rows,
+ * fallback verdicts, or a judge that differs from the calibrated one turn a
+ * ship into a hold.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { runChecks } from "./checks.js";
-import { loadJsonl, stratifiedSplit, writeJsonl, type Row } from "./data.js";
+import { isMain, numberFlag } from "./cli.js";
+import { dumps, fileSha256, loadJsonl, splitRows, writeJsonl, type Row } from "./data.js";
 import { band, pairedDelta, type Band } from "./gate.js";
-import { claudeJudge, describe, makeConfig, pickFewShots, setupProblem, type Effort, type Judge } from "./judge.js";
+import { EFFORTS, claudeJudge, describe, makeConfig, pickFewShots, priceKnown, setupProblem, type Effort, type Judge } from "./judge.js";
 import { wilson } from "./metrics.js";
 import { Budget, judgeRows } from "./runner.js";
 
@@ -29,10 +33,11 @@ export interface RowResult {
   must_pass: boolean;
   checks: Record<string, boolean>;
   check_failures: string[];
+  judged: boolean;
   judge: string | null;
   critique: string | null;
   served_by: string | null;
-  fallback_used?: boolean;
+  fallback_used: boolean | null;
   error: string | null;
   passed: boolean | null;
 }
@@ -48,9 +53,11 @@ export async function scoreRows(rows: Row[], judge: Judge, workers = 4, budget =
       must_pass: Boolean(row.must_pass),
       checks: Object.fromEntries(checks.map((c) => [c.name, c.passed])),
       check_failures: failed.map((c) => c.name + ": " + c.detail),
+      judged: false,
       judge: null,
       critique: null,
       served_by: null,
+      fallback_used: null,
       error: null,
       passed: null,
     });
@@ -58,6 +65,7 @@ export async function scoreRows(rows: Row[], judge: Judge, workers = 4, budget =
   }
   for (const o of await judgeRows(judge, toJudge, workers, budget)) {
     const r = results.get(o.row.id)!;
+    r.judged = true;
     if (o.verdict) {
       r.judge = o.verdict.label;
       r.critique = o.verdict.critique;
@@ -74,10 +82,55 @@ export async function scoreRows(rows: Row[], judge: Judge, workers = 4, budget =
 }
 
 /** Rogan-Gladen correction for judge error (point estimate only). */
-export function correctedRate(observed: number, passRecall: number, failRecall: number): number | null {
-  const denom = passRecall + failRecall - 1;
+export function roganGladen(observed: number, passRecall: number | null | undefined, failRecall: number | null | undefined): number | null {
+  if (![observed, passRecall, failRecall].every((v) => typeof v === "number" && Number.isFinite(v))) return null;
+  const denom = passRecall! + failRecall! - 1;
   if (denom <= 0) return null;
-  return Math.min(1, Math.max(0, (observed + failRecall - 1) / denom));
+  return Math.min(1, Math.max(0, (observed + failRecall! - 1) / denom));
+}
+
+/** Correct only the judged rows, then put the code-check failures back in. */
+export function correctedPassRate(results: RowResult[], passRecall?: number | null, failRecall?: number | null): number | null {
+  const known = results.filter((r) => r.passed !== null);
+  const judged = known.filter((r) => r.judged && r.check_failures.length === 0);
+  if (known.length === 0 || judged.length === 0) return null;
+  const observed = judged.filter((r) => r.judge === "PASS").length / judged.length;
+  const corrected = roganGladen(observed, passRecall, failRecall);
+  return corrected === null ? null : (corrected * judged.length) / known.length;
+}
+
+export function readBaseline(path: string): Map<string, boolean> {
+  const base = new Map<string, boolean>();
+  readFileSync(path, "utf8")
+    .split("\n")
+    .forEach((line, index) => {
+      if (!line.trim()) return;
+      let row: Partial<RowResult>;
+      try {
+        row = JSON.parse(line) as Partial<RowResult>;
+      } catch {
+        throw new Error(path + ":" + (index + 1) + ": not valid JSON; --baseline takes a results.jsonl from an earlier run");
+      }
+      if (!row || typeof row !== "object" || typeof row.id !== "string" || !("passed" in row)) {
+        throw new Error(path + ":" + (index + 1) + ": missing 'id' or 'passed'; --baseline takes a results.jsonl from an earlier run");
+      }
+      if (row.passed !== null && row.passed !== undefined) base.set(row.id, Boolean(row.passed));
+    });
+  if (base.size === 0) throw new Error(path + ": no scored rows");
+  return base;
+}
+
+function readCalibration(path: string) {
+  let data: { judge?: unknown; report?: { pass_recall?: number | null; fail_recall?: number | null } };
+  try {
+    data = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error(path + ": not valid JSON; --calibration takes a calibrate summary.json");
+  }
+  if (!data || typeof data !== "object" || !("judge" in data) || !("report" in data)) {
+    throw new Error(path + ": --calibration takes the summary.json from a calibrate run");
+  }
+  return data;
 }
 
 async function main(): Promise<number> {
@@ -86,9 +139,13 @@ async function main(): Promise<number> {
       data: { type: "string" },
       rubric: { type: "string" },
       labeled: { type: "string" },
+      seed: { type: "string", default: "42" },
+      "few-shots": { type: "string", default: "4" },
       calibration: { type: "string" },
       baseline: { type: "string" },
-      window: { type: "string", default: "0.02" },
+      indifference: { type: "string", default: "0.01" },
+      "minor-regression": { type: "string", default: "0.02" },
+      "min-paired": { type: "string", default: "30" },
       workers: { type: "string", default: "4" },
       model: { type: "string" },
       effort: { type: "string" },
@@ -99,21 +156,50 @@ async function main(): Promise<number> {
     console.error("usage: npm run eval -- --data <outputs.jsonl> --rubric <rubric.md> [--labeled ...] [--calibration ...] [--baseline ...]");
     return 2;
   }
-  const rows = loadJsonl(values.data);
-  const config = makeConfig(readFileSync(values.rubric, "utf8"), {
+
+  // Check every input before spending anything on judge calls.
+  let setup;
+  try {
+    if (values.effort && !EFFORTS.includes(values.effort as Effort)) throw new Error("--effort must be one of " + EFFORTS.join(", "));
+    setup = {
+      seed: numberFlag("seed", values.seed, { integer: true }),
+      fewShots: numberFlag("few-shots", values["few-shots"], { integer: true, min: 0 }),
+      indifference: numberFlag("indifference", values.indifference, { min: 0 }),
+      minorRegression: numberFlag("minor-regression", values["minor-regression"], { min: 0 }),
+      minPaired: numberFlag("min-paired", values["min-paired"], { integer: true, min: 0 }),
+      workers: numberFlag("workers", values.workers, { integer: true, min: 1 }),
+      budget: Budget.fromEnv(),
+      rows: loadJsonl(values.data),
+      base: values.baseline ? readBaseline(values.baseline) : null,
+      calibration: values.calibration ? readCalibration(values.calibration) : null,
+      rubric: readFileSync(values.rubric, "utf8"),
+    };
+  } catch (err) {
+    console.error((err as Error).message);
+    return 2;
+  }
+  const config = makeConfig(setup.rubric, {
     ...(values.model ? { model: values.model } : {}),
     ...(values.effort ? { effort: values.effort as Effort } : {}),
   });
-  if (values.labeled) config.fewShots = pickFewShots(stratifiedSplit(loadJsonl(values.labeled, true))[0]);
-
-  const calibration = values.calibration ? JSON.parse(readFileSync(values.calibration, "utf8")) : null;
-  if (calibration && JSON.stringify(calibration.judge) !== JSON.stringify(describe(config))) {
-    console.log("WARNING: this judge (model, effort, rubric or few-shots) differs from the calibrated one.");
-    console.log("         The calibration numbers do not apply to it. Calibrate again.");
+  if (values.labeled) config.fewShots = pickFewShots(splitRows(loadJsonl(values.labeled, true), setup.seed)[0], setup.fewShots);
+  if (setup.budget.limitUsd !== null && !priceKnown(config.model)) {
+    console.error("EVAL_BUDGET_USD is set but there's no price for " + config.model + " in src/judge.ts PRICES.");
+    return 2;
   }
 
-  const budget = Budget.fromEnv();
-  const results = await scoreRows(rows, claudeJudge(config), Number(values.workers), budget);
+  const holds: string[] = [];
+  const judgeMatches = !setup.calibration || JSON.stringify(setup.calibration.judge) === JSON.stringify(describe(config));
+  if (!judgeMatches) holds.push("this judge (model, effort, prompt or few-shots) differs from the calibrated one; calibrate again");
+
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  const outDir = join(values.out!, stamp + "-eval");
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(outDir, "rubric.md"), setup.rubric);
+
+  const results = await scoreRows(setup.rows, claudeJudge(config), setup.workers, setup.budget);
+  writeJsonl(join(outDir, "results.jsonl"), results); // paid for: save before anything else can fail
+
   const known = results.filter((r) => r.passed !== null);
   const passed = known.filter((r) => r.passed).length;
   const rate = known.length ? passed / known.length : NaN;
@@ -123,63 +209,77 @@ async function main(): Promise<number> {
   const judgeFails = results.filter((r) => r.judge === "FAIL").length;
   const mustFail = results.filter((r) => r.must_pass && r.passed === false).map((r) => r.id);
   const errors = results.filter((r) => r.error);
+  const fallbacks = results.filter((r) => r.fallback_used).length;
+  if (errors.length) holds.push(errors.length + " rows have no verdict (refusal, budget or bad output); see results.jsonl");
+  if (fallbacks) holds.push(fallbacks + " verdicts came from a fallback model, not the calibrated judge");
 
   const summary: Record<string, unknown> = {
     date: new Date().toISOString(),
     judge: describe(config),
+    dataset: { path: values.data, sha256: fileSha256(values.data) },
     n: results.length,
     scored: known.length,
     pass_rate: rate,
     pass_rate_ci: [lo, hi],
     check_failures: checkFails,
     judge_failures: judgeFails,
+    fallback_verdicts: fallbacks,
     must_pass_failures: mustFail,
     errors: errors.length,
-    estimated_cost_usd: Number(budget.spentUsd.toFixed(4)),
+    estimated_cost_usd: Number(setup.budget.spentUsd.toFixed(4)),
   };
-  if (calibration) {
-    summary.pass_rate_corrected = correctedRate(rate, calibration.report.pass_recall, calibration.report.fail_recall);
+  if (setup.calibration && judgeMatches) {
+    summary.pass_rate_corrected = correctedPassRate(results, setup.calibration.report?.pass_recall, setup.calibration.report?.fail_recall);
   }
 
   // Without a baseline there is nothing to compare: this run becomes the baseline.
   let verdict: Band | "baseline" = "baseline";
-  if (values.baseline) {
-    const base = new Map<string, boolean>();
-    for (const line of readFileSync(values.baseline, "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      const b = JSON.parse(line) as RowResult;
-      if (b.passed !== null) base.set(b.id, b.passed);
+  if (setup.base) {
+    const cand = new Map(known.map((r) => [r.id, r.passed as boolean]));
+    const unpaired = [...cand.keys()].filter((id) => !setup.base!.has(id)).sort();
+    if (unpaired.length) holds.push(unpaired.length + " ids aren't in the baseline and weren't compared: " + unpaired.slice(0, 10).join(", "));
+    if (![...cand.keys()].some((id) => setup.base!.has(id))) {
+      console.error("The baseline shares no scored ids with this run.");
+      writeFileSync(join(outDir, "summary.json"), dumps(summary, 2) + "\n");
+      return 1;
     }
-    const d = pairedDelta(base, new Map(known.map((r) => [r.id, r.passed as boolean])));
-    verdict = band(d, Number(values.window));
-    summary.vs_baseline = { ...d, band: verdict };
+    const d = pairedDelta(setup.base, cand);
+    verdict = band(d, setup.indifference, setup.minorRegression);
+    if (d.n < setup.minPaired) holds.push("only " + d.n + " paired rows; a ship needs at least " + setup.minPaired);
+    summary.vs_baseline = {
+      n: d.n,
+      baseline_rate: d.baseline_rate,
+      candidate_rate: d.candidate_rate,
+      delta: d.delta,
+      ci: d.ci,
+      band: verdict,
+      unpaired_ids: unpaired,
+      paired_counts: { both_pass: d.both_pass, baseline_only: d.baseline_only, candidate_only: d.candidate_only, both_fail: d.both_fail },
+    };
   }
   if (mustFail.length) verdict = "block";
-  if (errors.length && (verdict === "ship" || verdict === "baseline")) verdict = "hold";
+  else if (holds.length && (verdict === "ship" || verdict === "baseline")) verdict = "hold";
   summary.verdict = verdict;
+  summary.holds = holds;
+  writeFileSync(join(outDir, "summary.json"), dumps(summary, 2) + "\n");
 
-  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
-  const outDir = join(values.out!, stamp + "-eval");
-  mkdirSync(outDir, { recursive: true });
-  writeJsonl(join(outDir, "results.jsonl"), results);
-  writeFileSync(join(outDir, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
-
-  console.log("pass-all rate " + rate.toFixed(3) + "  95% CI [" + lo.toFixed(2) + ", " + hi.toFixed(2) + "]  n=" + known.length + "  judge=" + config.model + "@" + config.effort);
+  console.log("pass-all rate " + (Number.isFinite(rate) ? rate.toFixed(3) : "n/a") + "  95% CI [" + lo.toFixed(2) + ", " + hi.toFixed(2) + "]  n=" + known.length + "  judge=" + config.model + "@" + config.effort);
   if (typeof summary.pass_rate_corrected === "number") console.log("  corrected for judge error: " + summary.pass_rate_corrected.toFixed(3) + " (point estimate)");
   for (const [name, count] of Object.entries(checkFails).sort()) console.log("  code check " + name + ": " + count + " failed");
   console.log("  judge: " + judgeFails + " failed");
-  const vs = summary.vs_baseline as (ReturnType<typeof pairedDelta> & { band: Band }) | undefined;
+  const vs = summary.vs_baseline as { n: number; baseline_rate: number; candidate_rate: number; delta: number; ci: [number, number]; band: Band } | undefined;
   if (vs) {
     const sign = (x: number) => (x >= 0 ? "+" : "") + x.toFixed(3);
-    console.log("  vs baseline: " + vs.baseline_rate.toFixed(3) + " -> " + vs.candidate_rate.toFixed(3) + "  delta " + sign(vs.delta) + "  95% CI [" + sign(vs.ci[0]) + ", " + sign(vs.ci[1]) + "]  n=" + vs.n);
+    console.log("  vs baseline: " + vs.baseline_rate.toFixed(3) + " -> " + vs.candidate_rate.toFixed(3) + "  delta " + sign(vs.delta) + "  95% CI [" + sign(vs.ci[0]) + ", " + sign(vs.ci[1]) + "]  n=" + vs.n + "  band=" + vs.band);
   }
   if (mustFail.length) console.log("  regression set failures: " + mustFail.join(", "));
-  if (errors.length) console.log("  " + errors.length + " rows have no verdict (refusal, budget, or bad output); see results.jsonl");
+  for (const reason of holds) console.log("  hold: " + reason);
+  console.log("  estimated cost $" + (summary.estimated_cost_usd as number).toFixed(2));
   console.log("verdict: " + verdict.toUpperCase() + "   wrote " + outDir);
   return verdict === "ship" || verdict === "baseline" ? 0 : 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMain(import.meta.url)) {
   main().then(
     (code) => process.exit(code),
     (err: unknown) => {

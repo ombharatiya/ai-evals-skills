@@ -80,16 +80,46 @@ Codex reads it too, if you'd rather have always-on rules than a skill.
 - Gate releases on the interval of the paired difference (ship, hold, investigate, block),
   with a regression set that must pass 100%.
 
-Each rule links to the guide page that explains it and to its primary sources.
+The six reference files in [`skills/ai-evals/references`](skills/ai-evals/references) tie
+each rule to the guide page that explains it and to its primary sources.
+
+## Your first session
+
+Install the skill, put 50 or more real traces from your feature in the repo as JSON Lines,
+and ask your agent:
+
+> We need evals for the refund answers in our support bot. The traces are in
+> `evals/data/traces.jsonl`. Start with error analysis.
+
+A good answer builds a viewer for you to read traces in, and holds off on metrics until
+you've written notes on at least 30 of them. From there the agent clusters your notes into
+failure modes, adds code checks, writes one binary judge, and calibrates it against your
+labels with a starter.
+
+The full walkthrough, with the prompts to use and what to push back on, is on aievals.co:
+
+- [How to use the agent pack](https://www.aievals.co/agent-pack)
+- [Add evals to a feature with your coding agent](https://www.aievals.co/cookbook/evals-with-a-coding-agent)
 
 ## Starters
 
 Both starters run the same loop on an example dataset (a support bot checked for getting
 the refund policy wrong). Their tests run without an API key.
 
+Python 3.10+:
+
 ```bash
-cd starters/python && pip install -e ".[dev]" && pytest
-cd starters/typescript && npm install && npm test
+cd starters/python
+pip install -e ".[dev]"
+pytest
+```
+
+Node 22.12+:
+
+```bash
+cd starters/typescript
+npm install
+npm test
 ```
 
 Then follow [`starters/python/README.md`](starters/python/README.md) or

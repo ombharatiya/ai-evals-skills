@@ -33,7 +33,7 @@ Wilson half-widths around a 70% rate:
 
 | N | 10 | 50 | 100 | 200 | 500 | 1,000 | 2,000 |
 |---|---|---|---|---|---|---|---|
-| half-width, points | about 25 | about 13 | about 9 | about 6 | about 4 | about 3 | about 2 |
+| half-width, points | about 25 | about 12 to 13 | about 9 | about 6 | about 4 | about 3 | about 2 |
 
 Width shrinks with 1 / sqrt(n): halving it takes four times the examples. N = 200 is the
 guide's usual floor for a release gate.
@@ -64,7 +64,10 @@ Choose the smallest difference worth detecting first, then derive N.
 - Paired binary comparison at 80% power and 5% significance:
   `N = 7.85 * d / delta^2`, where `d` is the share of inputs where the two versions
   disagree and `delta` the difference to detect.
-- At a 70% baseline with a conservative 40% disagreement rate:
+  (https://www.aievals.co/techniques/statistical-methods).
+- The guide's table, at a 70% baseline with a conservative 40% disagreement rate. It runs
+  slightly above the two-line formula (about 660 against 641 at 7 points), so treat both as
+  planning numbers, not exact:
 
 | Difference to detect | 10 pts | 7 pts | 5 pts | 4 pts | 3 pts | 2 pts |
 |---|---|---|---|---|---|---|

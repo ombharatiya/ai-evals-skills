@@ -31,18 +31,23 @@ Rules:
 ## Release-gate bands
 
 Read the interval on the paired difference between the candidate and the production
-baseline, per metric (https://www.aievals.co/learn/production/release-gates; Evan Miller,
-https://arxiv.org/abs/2411.00640):
+baseline, per metric. Sources: https://www.aievals.co/learn/production/release-gates and
+Evan Miller, "Adding Error Bars to Evals" (https://arxiv.org/abs/2411.00640).
 
-| Band | The interval on the difference |
+Two windows: changes inside the indifference window aren't worth blocking on (the guide's
+figure uses 1 point), and the minor-regression window is the largest drop you'd ship with a
+written reason (the guide's default for quality is 2 points).
+
+| Band | Rule |
 |---|---|
-| Ship | sits above zero, or lies entirely inside the indifference window |
-| Hold | contains zero and reaches outside the window |
-| Investigate | sits below zero but inside the minor-regression window. Read 50 traces from the regressed slice; ship only with a written reason |
-| Block | sits below zero and reaches past the window |
+| Ship | the interval sits above zero, or both ends are inside the indifference window |
+| Hold | the interval contains zero and reaches outside the indifference window |
+| Investigate | the interval sits below zero and the drop (the point difference) is within the minor-regression window. Read 50 traces from the regressed slice; ship only with a written reason |
+| Block | the interval sits below zero and the drop is larger than the minor-regression window |
 
-Defaults: a 2-point window on the primary quality metric, 15% of baseline for p95 latency,
-10% of baseline for cost. Any change in refusal rate needs investigation.
+Defaults for the minor-regression window: 2 points on the primary quality metric, 15% of
+baseline for p95 latency, 10% of baseline for cost. Any change in refusal rate needs
+investigation.
 
 - Compute the difference from per-question paired differences, clustered where questions
   share a passage or a conversation.
@@ -59,9 +64,9 @@ Defaults: a 2-point window on the primary quality metric, 15% of baseline for p9
 - Guardrails are runtime checks, not evals.
 - Online judging is not the offline set run twice. Online samples aren't independent:
   cluster by user or conversation.
-- Read production data by hand regularly. Hamel Husain's ladder: level 1 checks on every
-  change, level 2 judges on a cadence, level 3 human review after significant product
-  changes.
+- Read production data by hand regularly. Hamel Husain's ladder: level 1 assertions on
+  every change, level 2 human review plus a judge on a labeled set on a cadence, level 3
+  production A/B tests after significant product changes.
 
 ## Sampling production traffic for evals
 
