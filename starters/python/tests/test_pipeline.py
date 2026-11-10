@@ -144,3 +144,71 @@ def test_run_eval_checks_inputs_before_spending(tmp_path, monkeypatch, capsys):
     bad.write_text('{"not": "a results file"}')
     code = run_eval_main(["--data", str(data), "--rubric", str(rubric), "--baseline", str(bad)])
     assert code == 2 and judge.seen == []
+
+
+def _write_rows(path, rows):
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return path
+
+
+def _run(tmp_path, monkeypatch, args, judge=None):
+    import evals.run_eval as run_eval
+
+    monkeypatch.setattr(run_eval, "ClaudeJudge", lambda config: judge or FakeJudge())
+    out = tmp_path / "runs"
+    code = run_eval_main(args + ["--out", str(out)])
+    summary = json.loads(sorted(out.glob("*-eval/summary.json"))[-1].read_text())
+    return code, summary
+
+
+def test_run_eval_holds_when_the_candidate_drops_baseline_rows(tmp_path, monkeypatch):
+    # The re-review's case: 500 baseline rows, the candidate produced only 400.
+    rows = [{"id": f"r{i}", "query": "q", "response": "fine"} for i in range(400)]
+    data = _write_rows(tmp_path / "data.jsonl", rows)
+    rubric = tmp_path / "rubric.md"
+    rubric.write_text("R")
+    base = _write_rows(tmp_path / "base.jsonl", [{"id": f"r{i}", "passed": True} for i in range(500)])
+    code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric),
+                                                 "--baseline", str(base), "--indifference", "0.2"])
+    assert code == 1 and summary["verdict"] == "hold"
+    assert len(summary["vs_baseline"]["missing_ids"]) == 100
+
+    # A missing regression row blocks.
+    base = _write_rows(tmp_path / "base2.jsonl",
+                       [{"id": f"r{i}", "passed": True, "must_pass": i == 450} for i in range(500)])
+    code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric),
+                                                 "--baseline", str(base), "--indifference", "0.2"])
+    assert code == 1 and summary["verdict"] == "block" and "r450" in summary["must_pass_failures"]
+
+
+def test_run_eval_refuses_a_calibration_that_did_not_pass(tmp_path, monkeypatch):
+    from evals.judge import JudgeConfig
+
+    data = _write_rows(tmp_path / "data.jsonl", [{"id": "a", "query": "q", "response": "r"}])
+    rubric = tmp_path / "rubric.md"
+    rubric.write_text("R")
+    failed = {"judge": JudgeConfig(rubric="R").describe(), "split": "test",
+              "report": {"pass_recall": 0.9, "fail_recall": 0.143}, "bar": {"passed": False}}
+    cal = tmp_path / "summary.json"
+    cal.write_text(json.dumps(failed))
+    code, summary = _run(tmp_path, monkeypatch, ["--data", str(data), "--rubric", str(rubric), "--calibration", str(cal)])
+    assert code == 1 and summary["verdict"] == "hold"
+    assert "pass_rate_corrected" not in summary
+    assert any("passing test read" in h for h in summary["holds"])
+
+
+def test_calibrate_records_whether_it_passed(tmp_path, monkeypatch):
+    import evals.calibrate as calibrate_mod
+
+    monkeypatch.setattr(calibrate_mod, "ClaudeJudge", lambda config: FakeJudge())
+    code = calibrate_mod.main(["--data", str(DATA / "labeled.example.jsonl"), "--rubric", str(DATA.parent / "rubrics" / "refund_policy.md"),
+                               "--out", str(tmp_path)])
+    summary = json.loads(next(tmp_path.glob("*/summary.json")).read_text())
+    assert code == 1 and summary["bar"]["passed"] is False and summary["bar"]["reasons"]
+
+
+def test_calibrate_rejects_zero_repeats(capsys):
+    import evals.calibrate as calibrate_mod
+
+    with pytest.raises(SystemExit):
+        calibrate_mod.main(["--data", "x", "--rubric", "y", "--repeats", "0"])

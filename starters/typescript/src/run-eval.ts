@@ -99,8 +99,10 @@ export function correctedPassRate(results: RowResult[], passRecall?: number | nu
   return corrected === null ? null : (corrected * judged.length) / known.length;
 }
 
-export function readBaseline(path: string): Map<string, boolean> {
+/** The baseline's pass/fail per id, and the ids it marks must_pass. */
+export function readBaseline(path: string): { base: Map<string, boolean>; mustPass: Set<string> } {
   const base = new Map<string, boolean>();
+  const mustPass = new Set<string>();
   readFileSync(path, "utf8")
     .split("\n")
     .forEach((line, index) => {
@@ -115,13 +117,22 @@ export function readBaseline(path: string): Map<string, boolean> {
         throw new Error(path + ":" + (index + 1) + ": missing 'id' or 'passed'; --baseline takes a results.jsonl from an earlier run");
       }
       if (row.passed !== null && row.passed !== undefined) base.set(row.id, Boolean(row.passed));
+      if (row.must_pass) mustPass.add(row.id);
     });
   if (base.size === 0) throw new Error(path + ": no scored rows");
-  return base;
+  return { base, mustPass };
 }
 
-function readCalibration(path: string) {
-  let data: { judge?: unknown; report?: { pass_recall?: number | null; fail_recall?: number | null } };
+interface CalibrationRecord {
+  judge?: unknown;
+  split?: string;
+  bar?: { passed?: boolean };
+  label_flips_across_repeats?: number | null;
+  report?: { n?: number; pass_recall?: number | null; fail_recall?: number | null };
+}
+
+function readCalibration(path: string): CalibrationRecord {
+  let data: CalibrationRecord;
   try {
     data = JSON.parse(readFileSync(path, "utf8"));
   } catch {
@@ -170,9 +181,10 @@ async function main(): Promise<number> {
       workers: numberFlag("workers", values.workers, { integer: true, min: 1 }),
       budget: Budget.fromEnv(),
       rows: loadJsonl(values.data),
-      base: values.baseline ? readBaseline(values.baseline) : null,
+      baseline: values.baseline ? readBaseline(values.baseline) : null,
       calibration: values.calibration ? readCalibration(values.calibration) : null,
       rubric: readFileSync(values.rubric, "utf8"),
+      labeled: values.labeled ? loadJsonl(values.labeled, true) : null,
     };
   } catch (err) {
     console.error((err as Error).message);
@@ -182,15 +194,33 @@ async function main(): Promise<number> {
     ...(values.model ? { model: values.model } : {}),
     ...(values.effort ? { effort: values.effort as Effort } : {}),
   });
-  if (values.labeled) config.fewShots = pickFewShots(splitRows(loadJsonl(values.labeled, true), setup.seed)[0], setup.fewShots);
+  if (setup.labeled) {
+    config.fewShots = pickFewShots(splitRows(setup.labeled, setup.seed)[0], setup.fewShots);
+    const labels = new Set(config.fewShots.map((r) => r.label));
+    for (const l of ["PASS", "FAIL"]) {
+      if (config.fewShots.length && !labels.has(l as "PASS")) console.error("warning: the few-shots have no " + l + " example: train holds none; label more rows");
+    }
+  }
   if (setup.budget.limitUsd !== null && !priceKnown(config.model)) {
     console.error("EVAL_BUDGET_USD is set but there's no price for " + config.model + " in src/judge.ts PRICES.");
     return 2;
   }
 
   const holds: string[] = [];
-  const judgeMatches = !setup.calibration || JSON.stringify(setup.calibration.judge) === JSON.stringify(describe(config));
-  if (!judgeMatches) holds.push("this judge (model, effort, prompt or few-shots) differs from the calibrated one; calibrate again");
+  let calibrationOk = false;
+  let flipRate = 0;
+  if (setup.calibration) {
+    const cal = setup.calibration;
+    if (JSON.stringify(cal.judge) !== JSON.stringify(describe(config))) {
+      holds.push("this judge (model, effort, prompt or few-shots) differs from the calibrated one; calibrate again");
+    } else if (cal.split !== "test" || !cal.bar?.passed) {
+      holds.push("the calibration record isn't a passing test read; calibrate on dev until it clears the bar, then read test");
+    } else {
+      calibrationOk = true;
+    }
+    const flips = cal.label_flips_across_repeats;
+    if (typeof flips === "number" && cal.report?.n) flipRate = flips / cal.report.n;
+  }
 
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
   const outDir = join(values.out!, stamp + "-eval");
@@ -207,7 +237,7 @@ async function main(): Promise<number> {
   const checkFails: Record<string, number> = {};
   for (const r of results) for (const [name, ok] of Object.entries(r.checks)) if (!ok) checkFails[name] = (checkFails[name] ?? 0) + 1;
   const judgeFails = results.filter((r) => r.judge === "FAIL").length;
-  const mustFail = results.filter((r) => r.must_pass && r.passed === false).map((r) => r.id);
+  let mustFail = results.filter((r) => r.must_pass && r.passed === false).map((r) => r.id);
   const errors = results.filter((r) => r.error);
   const fallbacks = results.filter((r) => r.fallback_used).length;
   if (errors.length) holds.push(errors.length + " rows have no verdict (refusal, budget or bad output); see results.jsonl");
@@ -228,22 +258,32 @@ async function main(): Promise<number> {
     errors: errors.length,
     estimated_cost_usd: Number(setup.budget.spentUsd.toFixed(4)),
   };
-  if (setup.calibration && judgeMatches) {
+  if (setup.calibration && calibrationOk) {
     summary.pass_rate_corrected = correctedPassRate(results, setup.calibration.report?.pass_recall, setup.calibration.report?.fail_recall);
   }
 
   // Without a baseline there is nothing to compare: this run becomes the baseline.
   let verdict: Band | "baseline" = "baseline";
-  if (setup.base) {
+  if (setup.baseline) {
+    const { base, mustPass } = setup.baseline;
     const cand = new Map(known.map((r) => [r.id, r.passed as boolean]));
-    const unpaired = [...cand.keys()].filter((id) => !setup.base!.has(id)).sort();
+    const unpaired = [...cand.keys()].filter((id) => !base.has(id)).sort();
     if (unpaired.length) holds.push(unpaired.length + " ids aren't in the baseline and weren't compared: " + unpaired.slice(0, 10).join(", "));
-    if (![...cand.keys()].some((id) => setup.base!.has(id))) {
+    const produced = new Set(results.map((r) => r.id));
+    const absent = [...base.keys()].filter((id) => !produced.has(id)).sort();
+    if (absent.length) holds.push(absent.length + " baseline ids are missing from this run: " + absent.slice(0, 10).join(", "));
+    const absentMust = absent.filter((id) => mustPass.has(id));
+    if (absentMust.length) {
+      // A regression row the candidate didn't produce can't count as passing.
+      mustFail = [...mustFail, ...absentMust];
+      summary.must_pass_failures = mustFail;
+    }
+    if (![...cand.keys()].some((id) => base.has(id))) {
       console.error("The baseline shares no scored ids with this run.");
       writeFileSync(join(outDir, "summary.json"), dumps(summary, 2) + "\n");
       return 1;
     }
-    const d = pairedDelta(setup.base, cand);
+    const d = pairedDelta(base, cand);
     verdict = band(d, setup.indifference, setup.minorRegression);
     if (d.n < setup.minPaired) holds.push("only " + d.n + " paired rows; a ship needs at least " + setup.minPaired);
     summary.vs_baseline = {
@@ -254,6 +294,7 @@ async function main(): Promise<number> {
       ci: d.ci,
       band: verdict,
       unpaired_ids: unpaired,
+      missing_ids: absent,
       paired_counts: { both_pass: d.both_pass, baseline_only: d.baseline_only, candidate_only: d.candidate_only, both_fail: d.both_fail },
     };
   }
@@ -264,14 +305,17 @@ async function main(): Promise<number> {
   const resRate = vsBase ? vsBase.baseline_rate : rate;
   const notes: string[] = [];
   if (resN > 0 && Number.isFinite(resRate)) {
-    const half = noChangeHalfwidth(resN, resRate);
-    const needed = rowsForIndifference(resRate, setup.indifference, resN);
-    summary.resolution = { n: resN, no_change_halfwidth: half, rows_for_indifference: needed };
+    const half = noChangeHalfwidth(resN, resRate, flipRate);
+    const needed = rowsForIndifference(resRate, setup.indifference, resN, 1_000_000, flipRate);
+    summary.resolution = { n: resN, flip_rate: flipRate, no_change_halfwidth: half, rows_for_indifference: needed };
+    const flipsText = flipRate
+      ? " with the judge flipping " + (flipRate * 100).toFixed(1) + "% of labels between runs"
+      : " (a floor: it assumes the judge never flips a label; calibrate with --repeats 2 to measure flips)";
     if (half > setup.indifference) {
       notes.push(
-        "with " + resN + " rows at this pass rate, an unchanged candidate's interval is about +-" + half.toFixed(3) +
+        "with " + resN + " rows at this pass rate" + flipsText + ", an unchanged candidate's interval is about +-" + half.toFixed(3) +
           ", wider than the " + setup.indifference.toFixed(3) + " indifference window, so no candidate can ship by staying the same. " +
-          "Grow the gate set to about " + needed + " rows" + (needed ? ", or pass --indifference " + half.toFixed(3) + " or more" : ""),
+          (needed ? "Grow the gate set to about " + needed + " rows, or pass --indifference " + half.toFixed(3) + " or more" : "Pass --indifference " + half.toFixed(3) + " or more"),
       );
     }
   }

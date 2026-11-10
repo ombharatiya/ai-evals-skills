@@ -34,7 +34,7 @@ adding rows never moves an existing one. Read
 `runs/<timestamp>-calibrate-dev/disagreements.jsonl`, change one thing in the rubric, and run
 again. `--repeats 2` counts labels that flip between identical runs.
 
-The bar: every split row gets a verdict, each class has at least 30 rows in the split
+The bar: every split row gets a verdict (none from a fallback model), each class has at least 30 rows in the split
 (`--min-per-class`), PASS and FAIL recall reach 0.90 (`--min-recall`), and kappa reaches 0.60
 (`--min-kappa`). The 40-row example set shows the loop but can't clear it.
 
@@ -61,13 +61,15 @@ ship exits 0, and hold, investigate or block exit 1.
 
 Some conditions override the band:
 
-- **Block.** A failing `"must_pass": true` row blocks.
+- **Block.** A failing `"must_pass": true` row blocks, and so does a baseline `must_pass` row
+  that's missing from this run.
 - **Hold.** Any of these turns a ship into a hold:
   - rows with no verdict
-  - candidate ids missing from the baseline
+  - candidate ids missing from the baseline, or baseline ids missing from this run
   - fewer than 30 paired rows (`--min-paired`)
   - fallback verdicts
   - a judge fingerprint that differs from the calibration record
+  - a calibration record that isn't a passing test read
 - **Exit code.** Without `--baseline`, the run becomes the baseline and exits 0, unless one
   of the conditions above applies.
 
@@ -75,7 +77,9 @@ Pass the same `--labeled`, `--seed` and `--few-shots` you calibrated with.
 
 Every run prints the gate set's resolution: how wide the interval is for a candidate that
 matches the baseline on every row. At a 76% pass rate that's about plus or minus 5.3 points
-with 50 rows, so the 1-point default window needs about 280 rows. Grow the set, or pass
+with 50 rows, so the 1-point default window needs at least 280 rows, and about 830 if the
+judge flips 2% of its labels between identical runs. With a `--repeats 2` calibration record
+passed as `--calibration`, the resolution uses the measured flip rate. Grow the set, or pass
 `--indifference` at least as wide as the printed resolution.
 
 ## Pinning and cost

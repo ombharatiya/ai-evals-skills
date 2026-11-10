@@ -81,31 +81,40 @@ def paired_delta(baseline: dict[str, bool], candidate: dict[str, bool]) -> Delta
                  both_pass=a, baseline_only=b, candidate_only=c, both_fail=d)
 
 
-def no_change_halfwidth(n: int, rate: float) -> float:
-    """How wide the interval is when a candidate matches the baseline on every row.
+def no_change_halfwidth(n: int, rate: float, flip_rate: float = 0.0) -> float:
+    """How wide the interval is for a candidate that is really unchanged.
 
     This is the gate set's resolution: a ship needs the whole interval inside
-    the indifference window, so a window narrower than this can never ship an
-    unchanged candidate.
+    the indifference window, so a window narrower than this can't ship an
+    unchanged candidate. A judge that flips a share `flip_rate` of its labels
+    between identical runs adds that many disagreeing pairs, split both ways,
+    which widens the interval. With flip_rate=0 (a perfectly repeatable
+    judge) the result is a floor.
     """
     passes = int(rate * n + 0.5)  # round half up, as the TypeScript starter does
-    _, lo, hi = newcombe_paired(passes, 0, 0, n - passes)
+    half_flips = int(flip_rate * n / 2 + 0.5)
+    b = c = min(half_flips, passes, n - passes)
+    _, lo, hi = newcombe_paired(passes - b, b, c, n - passes - c)
     return max(-lo, hi)
 
 
-def rows_for_indifference(rate: float, indifference: float, start: int = 1, limit: int = 1_000_000) -> int | None:
+def rows_for_indifference(rate: float, indifference: float, start: int = 1, limit: int = 1_000_000,
+                          flip_rate: float = 0.0) -> int | None:
     """Smallest gate-set size whose no-change interval fits inside the window."""
+    def fits(n: int) -> bool:
+        return no_change_halfwidth(n, rate, flip_rate) <= indifference
+
     n = max(1, start)
-    if no_change_halfwidth(n, rate) <= indifference:
+    if fits(n):
         return n
     lo = n
-    while no_change_halfwidth(n, rate) > indifference:
+    while not fits(n):
         lo, n = n, n * 2
         if n > limit:
             return None
     while lo + 1 < n:
         mid = (lo + n) // 2
-        if no_change_halfwidth(mid, rate) <= indifference:
+        if fits(mid):
             n = mid
         else:
             lo = mid

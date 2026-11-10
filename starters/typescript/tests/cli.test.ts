@@ -1,0 +1,113 @@
+/**
+ * Runs the real run-eval CLI against a fake Messages API on localhost, so the
+ * release-gate decisions are checked end to end. No network, no API key.
+ */
+import { execFile } from "node:child_process";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { afterAll, beforeAll, describe as group, expect, it } from "vitest";
+import { describe, makeConfig } from "../src/judge.js";
+import { noChangeHalfwidth, rowsForIndifference } from "../src/gate.js";
+import { estimateCost } from "../src/judge.js";
+import type Anthropic from "@anthropic-ai/sdk";
+
+const run = promisify(execFile);
+const root = new URL("..", import.meta.url).pathname;
+let server: Server;
+let baseUrl = "";
+
+beforeAll(async () => {
+  server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          id: "msg_test", type: "message", role: "assistant", model: "claude-opus-5-5",
+          content: [{ type: "text", text: JSON.stringify({ label: "PASS", critique: "ok" }) }],
+          stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address && typeof address === "object") baseUrl = "http://127.0.0.1:" + address.port;
+});
+
+afterAll(() => {
+  server.close();
+});
+
+function writeLines(path: string, rows: unknown[]) {
+  writeFileSync(path, rows.map((r) => JSON.stringify(r) + "\n").join(""));
+  return path;
+}
+
+async function runEval(dir: string, args: string[]) {
+  const out = join(dir, "runs");
+  let code = 0;
+  try {
+    await run(join(root, "node_modules/.bin/tsx"), [join(root, "src/run-eval.ts"), ...args, "--out", out], {
+      env: { ...process.env, ANTHROPIC_API_KEY: "test-key", ANTHROPIC_BASE_URL: baseUrl, EVAL_BUDGET_USD: "" },
+    });
+  } catch (err) {
+    code = (err as { code?: number }).code ?? 1;
+  }
+  const runDir = readdirSync(out).filter((d) => d.endsWith("-eval")).sort().pop()!;
+  return { code, summary: JSON.parse(readFileSync(join(out, runDir, "summary.json"), "utf8")) };
+}
+
+group("run-eval CLI", () => {
+  it("holds when the candidate drops baseline rows, and blocks when one was a regression row", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-"));
+    const rubric = join(dir, "rubric.md");
+    writeFileSync(rubric, "R");
+    const data = writeLines(join(dir, "data.jsonl"), Array.from({ length: 400 }, (_, i) => ({ id: "r" + i, query: "q", response: "fine" })));
+    const base = writeLines(join(dir, "base.jsonl"), Array.from({ length: 500 }, (_, i) => ({ id: "r" + i, passed: true })));
+    let r = await runEval(dir, ["--data", data, "--rubric", rubric, "--baseline", base, "--indifference", "0.2"]);
+    expect(r.code).toBe(1);
+    expect(r.summary.verdict).toBe("hold");
+    expect(r.summary.vs_baseline.missing_ids).toHaveLength(100);
+
+    const base2 = writeLines(join(dir, "base2.jsonl"), Array.from({ length: 500 }, (_, i) => ({ id: "r" + i, passed: true, must_pass: i === 450 })));
+    r = await runEval(dir, ["--data", data, "--rubric", rubric, "--baseline", base2, "--indifference", "0.2"]);
+    expect(r.code).toBe(1);
+    expect(r.summary.verdict).toBe("block");
+    expect(r.summary.must_pass_failures).toContain("r450");
+  }, 60_000);
+
+  it("refuses a calibration record that didn't pass", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-"));
+    const rubric = join(dir, "rubric.md");
+    writeFileSync(rubric, "R");
+    const data = writeLines(join(dir, "data.jsonl"), [{ id: "a", query: "q", response: "r" }]);
+    const cal = join(dir, "summary.json");
+    writeFileSync(cal, JSON.stringify({ judge: describe(makeConfig("R")), split: "test", report: { pass_recall: 0.9, fail_recall: 0.143 }, bar: { passed: false } }));
+    const r = await runEval(dir, ["--data", data, "--rubric", rubric, "--calibration", cal]);
+    expect(r.code).toBe(1);
+    expect(r.summary.verdict).toBe("hold");
+    expect(r.summary).not.toHaveProperty("pass_rate_corrected");
+  }, 60_000);
+});
+
+group("parity with the Python starter", () => {
+  it("computes the same judge fingerprint", () => {
+    const config = makeConfig("R", { fewShots: [{ id: "f1", query: "q", response: "r", label: "FAIL", critique: "naïve x" }] });
+    expect(describe(config).prompt_sha256).toBe("7837062c1b9d6ee52eb994de04b29ecc8a25eb5ab6e1e8e902e4cc12fdac4189");
+  });
+
+  it("accounts for judge flips in the gate resolution", () => {
+    expect(rowsForIndifference(0.76, 0.01, 1, 1_000_000, 0.02)).toBe(831);
+    expect(rowsForIndifference(0.76, 0.01, 1, 1_000_000, 0.05)).toBe(1959);
+    expect(noChangeHalfwidth(280, 0.76, 0.02)).toBeCloseTo(0.0197, 3);
+  });
+
+  it("prices a response without a breakdown at the model that served it", () => {
+    const usage = { input_tokens: 1000, output_tokens: 400 } as Anthropic.Beta.Messages.BetaUsage;
+    expect(estimateCost("claude-opus-5-5", usage, "claude-opus-4-8")).toBeCloseTo((1000 * 5 + 400 * 25) / 1e6, 12);
+  });
+});

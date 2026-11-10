@@ -61,7 +61,7 @@ PRICES: dict[str, tuple[float, float, float]] = {
     "claude-opus-4-8": (5.00, 25.00, 0.50),
     "claude-sonnet-5": (2.00, 10.00, 0.20),
     "claude-fable-5-2": (8.00, 40.00, 0.20),
-    "claude-fable-5-1": (10.00, 50.00, 1.00),
+    "claude-fable-5-1": (10.00, 50.00, 0.25),
 }
 # A model missing from the table is charged at the most expensive known rate,
 # so an unknown fallback can't slip under the budget.
@@ -106,9 +106,11 @@ class JudgeConfig:
 
     @property
     def prompt_sha256(self) -> str:
+        # Canonical JSON (sorted keys, no spaces, raw UTF-8) so the Python and
+        # TypeScript starters compute the same fingerprint for the same judge.
         blob = json.dumps(
-            {"system": render_system(self), "schema": VERDICT_SCHEMA, "max_tokens": MAX_TOKENS},
-            sort_keys=True,
+            {"max_tokens": MAX_TOKENS, "schema": VERDICT_SCHEMA, "system": render_system(self)},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         )
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -178,11 +180,12 @@ def _cost_of(model: str | None, usage: Any) -> float:
     return (uncached * price_in + written * price_in * 1.25 + read * price_read + out * price_out) / 1e6
 
 
-def estimate_cost(requested_model: str, usage: Any) -> float:
+def estimate_cost(requested_model: str, usage: Any, served_model: str | None = None) -> float:
     """Price each model call in the response at the model that made it.
 
     With fallbacks, one response can hold several calls (the declined one
-    and the rescue), listed in `usage.iterations`.
+    and the rescue), listed in `usage.iterations`. Without that breakdown,
+    the whole response is priced at the model that served it.
     """
     if usage is None:
         return 0.0
@@ -190,7 +193,7 @@ def estimate_cost(requested_model: str, usage: Any) -> float:
     priced = [it for it in iterations if getattr(it, "input_tokens", None) is not None]
     if priced:
         return sum(_cost_of(getattr(it, "model", None) or requested_model, it) for it in priced)
-    return _cost_of(requested_model, usage)
+    return _cost_of(served_model or requested_model, usage)
 
 
 class ClaudeJudge:
@@ -235,7 +238,7 @@ class ClaudeJudge:
     def _parse(self, row: Row, response: Any) -> Verdict:
         # Charge the call before deciding whether it produced a verdict:
         # a refusal or a truncated answer still costs money.
-        cost = estimate_cost(self.config.model, getattr(response, "usage", None))
+        cost = estimate_cost(self.config.model, getattr(response, "usage", None), getattr(response, "model", None))
         if response.stop_reason == "refusal":
             details = getattr(response, "stop_details", None)
             category = getattr(details, "category", None) if details else None

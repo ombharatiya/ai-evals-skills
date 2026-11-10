@@ -88,25 +88,30 @@ export function pairedDelta(baseline: Map<string, boolean>, candidate: Map<strin
  * row: the gate set's resolution. A window narrower than this can never ship
  * an unchanged candidate.
  */
-export function noChangeHalfwidth(n: number, rate: number): number {
-  const passes = Math.round(rate * n);
-  const [, lo, hi] = newcombePaired(passes, 0, 0, n - passes);
+export function noChangeHalfwidth(n: number, rate: number, flipRate = 0): number {
+  // A judge that flips a share of its labels between identical runs adds that
+  // many disagreeing pairs, split both ways. flipRate = 0 gives a floor.
+  const passes = Math.floor(rate * n + 0.5);
+  const halfFlips = Math.floor((flipRate * n) / 2 + 0.5);
+  const b = Math.min(halfFlips, passes, n - passes);
+  const [, lo, hi] = newcombePaired(passes - b, b, b, n - passes - b);
   return Math.max(-lo, hi);
 }
 
 /** Smallest gate-set size whose no-change interval fits inside the window. */
-export function rowsForIndifference(rate: number, indifference: number, start = 1, limit = 1_000_000): number | null {
+export function rowsForIndifference(rate: number, indifference: number, start = 1, limit = 1_000_000, flipRate = 0): number | null {
+  const fits = (n: number) => noChangeHalfwidth(n, rate, flipRate) <= indifference;
   let n = Math.max(1, start);
-  if (noChangeHalfwidth(n, rate) <= indifference) return n;
+  if (fits(n)) return n;
   let lo = n;
-  while (noChangeHalfwidth(n, rate) > indifference) {
+  while (!fits(n)) {
     lo = n;
     n *= 2;
     if (n > limit) return null;
   }
   while (lo + 1 < n) {
     const mid = Math.floor((lo + n) / 2);
-    if (noChangeHalfwidth(mid, rate) <= indifference) n = mid;
+    if (fits(mid)) n = mid;
     else lo = mid;
   }
   return n;

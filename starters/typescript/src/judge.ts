@@ -54,7 +54,7 @@ export const PRICES: Record<string, [number, number, number]> = {
   "claude-opus-4-8": [5.0, 25.0, 0.5],
   "claude-sonnet-5": [2.0, 10.0, 0.2],
   "claude-fable-5-2": [8.0, 40.0, 0.2],
-  "claude-fable-5-1": [10.0, 50.0, 1.0],
+  "claude-fable-5-1": [10.0, 50.0, 0.25],
 };
 /** A model missing from the table is charged at the most expensive known rate. */
 const WORST = Object.values(PRICES).reduce((a, b) => (b[1] > a[1] ? b : a));
@@ -95,11 +95,23 @@ export function makeConfig(rubric: string, overrides: Partial<JudgeConfig> = {})
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
+/** JSON with sorted keys and no spaces, the same bytes Python's sort_keys=True, separators=(",", ":") writes. */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
+  if (value && typeof value === "object") {
+    const entries = Object.keys(value as object)
+      .sort()
+      .map((k) => JSON.stringify(k) + ":" + canonicalJson((value as Record<string, unknown>)[k]));
+    return "{" + entries.join(",") + "}";
+  }
+  return JSON.stringify(value);
+}
+
 export function describe(config: JudgeConfig) {
   return {
     model: config.model,
     effort: config.effort,
-    prompt_sha256: sha256(JSON.stringify({ max_tokens: MAX_TOKENS, schema: VERDICT_SCHEMA, system: renderSystem(config) })),
+    prompt_sha256: sha256(canonicalJson({ max_tokens: MAX_TOKENS, schema: VERDICT_SCHEMA, system: renderSystem(config) })),
     rubric_sha256: sha256(config.rubric),
     few_shot_ids: config.fewShots.map((r) => r.id),
   };
@@ -162,8 +174,9 @@ function costOf(model: string | null | undefined, usage: TokenCounts): number {
 /**
  * Price each model call in the response at the model that made it. With
  * fallbacks, one response can hold several calls, listed in usage.iterations.
+ * Without that breakdown, the response is priced at the model that served it.
  */
-export function estimateCost(requestedModel: string, usage: Anthropic.Beta.Messages.BetaUsage | undefined): number {
+export function estimateCost(requestedModel: string, usage: Anthropic.Beta.Messages.BetaUsage | undefined, servedModel?: string | null): number {
   if (!usage) return 0;
   const priced = (usage.iterations ?? []).filter(
     (it): it is Extract<typeof it, TokenCounts> => typeof (it as Partial<TokenCounts>).input_tokens === "number",
@@ -171,7 +184,7 @@ export function estimateCost(requestedModel: string, usage: Anthropic.Beta.Messa
   if (priced.length > 0) {
     return priced.reduce((sum, it) => sum + costOf(("model" in it ? (it.model as string | null) : null) ?? requestedModel, it), 0);
   }
-  return costOf(requestedModel, usage);
+  return costOf(servedModel ?? requestedModel, usage);
 }
 
 /** Calls Claude once per row. Pass `client` to point it at a stub in tests. */
@@ -202,7 +215,7 @@ export function claudeJudge(config: JudgeConfig, client: Anthropic = new Anthrop
     }
     // Charge the call before deciding whether it produced a verdict: a refusal
     // or a truncated answer still costs money.
-    const cost = estimateCost(config.model, response.usage);
+    const cost = estimateCost(config.model, response.usage, response.model);
     if (response.stop_reason === "refusal") {
       const category = response.stop_details?.category ?? "none";
       throw new JudgeError(row.id + ": the judge declined (category: " + category + ")", cost);

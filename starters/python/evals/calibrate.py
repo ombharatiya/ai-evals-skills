@@ -42,6 +42,15 @@ def is_setup_error(exc: Exception) -> bool:
     return not isinstance(exc, TypeError) or "authentication" in str(exc).lower()
 
 
+def few_shot_warnings(few_shots: list[dict]) -> list[str]:
+    """The split isn't stratified, so a small train split can miss a class."""
+    labels = {r.get("label") for r in few_shots}
+    missing = [label for label in ("PASS", "FAIL") if label not in labels]
+    if not few_shots:
+        return []
+    return [f"the few-shots have no {label} example: train holds none; label more rows" for label in missing]
+
+
 def calibrate(
     rows: list[dict],
     judge: Judge,
@@ -116,6 +125,8 @@ def bar_failures(summary: dict, min_recall: float, min_kappa: float, min_per_cla
     reasons = []
     if summary["errors"]:
         reasons.append(f"{summary['errors']} rows got no verdict (see predictions.jsonl)")
+    if summary.get("fallback_verdicts"):
+        reasons.append(f"{summary['fallback_verdicts']} verdicts came from a fallback model, not this judge")
     for label, n in summary["split_class_counts"].items():
         if n < min_per_class:
             reasons.append(f"only {n} {label} rows in this split; the bar needs {min_per_class} per class")
@@ -154,15 +165,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--effort", default=None, help="judge effort (default: $JUDGE_EFFORT or medium)")
     p.add_argument("--out", default="runs")
     args = p.parse_args(argv)
+    for name, value, low in (("repeats", args.repeats, 1), ("workers", args.workers, 1),
+                             ("few-shots", args.few_shots, 0), ("min-per-class", args.min_per_class, 0)):
+        if value < low:
+            p.error(f"--{name} must be at least {low}")
 
     try:
         budget = Budget.from_env()
-    except ValueError as exc:
+        rows = load_jsonl(args.data, require_label=True)
+        rubric = Path(args.rubric).read_text(encoding="utf-8")
+    except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)
         return 2
-    rows = load_jsonl(args.data, require_label=True)
     train, dev, test = split_rows(rows, seed=args.seed, train=TRAIN_FRACTION, dev=DEV_FRACTION)
-    config = JudgeConfig(rubric=Path(args.rubric).read_text(encoding="utf-8"))
+    config = JudgeConfig(rubric=rubric)
     if args.model:
         config.model = args.model
     if args.effort:
@@ -197,6 +213,19 @@ def main(argv: list[str] | None = None) -> int:
         print("Set ANTHROPIC_API_KEY (or run `ant auth login`) and check --model.", file=sys.stderr)
         return 2
 
+    reasons = bar_failures(summary, args.min_recall, args.min_kappa, args.min_per_class)
+    warnings = few_shot_warnings(config.few_shots)
+    # Record the result, so run_eval can refuse a calibration that didn't pass.
+    summary["bar"] = {
+        "passed": not reasons,
+        "reasons": reasons,
+        "min_recall": args.min_recall,
+        "min_kappa": args.min_kappa,
+        "min_per_class": args.min_per_class,
+    }
+    summary["warnings"] = warnings
+    (out_dir / "summary.json").write_text(dumps(summary, indent=2) + "\n")
+
     r = summary["report"]
     c = r["confusion"]
     counts = summary["split_class_counts"]
@@ -209,9 +238,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {summary['fallback_verdicts']} verdicts came from a fallback model, not the calibrated judge")
     if summary["label_flips_across_repeats"]:
         print(f"  {summary['label_flips_across_repeats']} labels flipped between repeats: treat small moves as noise")
+    for warning in warnings:
+        print(f"  warning: {warning}")
     print(f"  estimated cost ${summary['estimated_cost_usd']:.2f}   wrote {out_dir}")
 
-    reasons = bar_failures(summary, args.min_recall, args.min_kappa, args.min_per_class)
     if not reasons and args.split == "dev":
         print("Dev clears the bar. Run once with --split test and keep that number.")
     elif not reasons:
@@ -223,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.split == "dev":
             print("Read disagreements.jsonl, change one thing in the rubric (or label more rows), run again.")
         else:
-            print("Don't tune on test. Label fresh rows, calibrate on dev again, then read test once more on the new rows.")
+            print("Don't tune on test. Label a fresh batch, calibrate on dev again, and treat the next test read as a re-read: it includes rows you have already seen.")
     return 0 if not reasons else 1
 
 

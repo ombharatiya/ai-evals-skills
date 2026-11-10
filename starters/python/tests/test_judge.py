@@ -78,3 +78,17 @@ def test_fingerprint_changes_with_any_prompt_change():
     assert a["few_shot_ids"] == b["few_shot_ids"]  # same ids...
     assert a["prompt_sha256"] != b["prompt_sha256"] != c["prompt_sha256"]  # ...different prompt
     assert JudgeConfig(rubric="R", few_shots=[shot]).describe() == a
+
+
+def test_fingerprint_matches_the_typescript_starter():
+    # Same canonical JSON in both languages; the TypeScript test checks the same value.
+    shot = {"id": "f1", "query": "q", "response": "r", "label": "FAIL", "critique": "naïve x"}
+    assert JudgeConfig(rubric="R", few_shots=[shot]).describe()["prompt_sha256"] == (
+        "7837062c1b9d6ee52eb994de04b29ecc8a25eb5ab6e1e8e902e4cc12fdac4189"
+    )
+
+
+def test_without_an_iteration_breakdown_the_served_model_is_priced():
+    usage = SimpleNamespace(input_tokens=1000, output_tokens=400, cache_creation_input_tokens=0,
+                            cache_read_input_tokens=0, iterations=None)
+    assert estimate_cost("claude-opus-5-5", usage, "claude-opus-4-8") == pytest.approx((1000 * 5 + 400 * 25) / 1e6)

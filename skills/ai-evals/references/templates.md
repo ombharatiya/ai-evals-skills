@@ -127,10 +127,12 @@ prompt and make the same model call?
 |---|---|---|---|---|---|---|
 | Pass-all rate | 0.912 | 0.934 | +0.022 | [-0.004, +0.047] | 410 | hold |
 | Regression set | 62/62 | 62/62 | 0 | | 62 | ship |
-| p95 latency | 2.1 s | 2.2 s | +4.8% | [+1.9%, +7.6%] | 410 | ship (within the 15% window) |
-| Cost per 1k requests | $4.10 | $4.30 | +4.9% | [+3.1%, +6.7%] | 410 | ship (within the 10% window) |
+| p95 latency | 2.1 s | 2.2 s | +4.8% | [+1.9%, +7.6%] | 410 | investigate (a sure rise, inside the 15% window) |
+| Cost per 1k requests | $4.10 | $4.30 | +4.9% | [+3.1%, +6.7%] | 410 | investigate (a sure rise, inside the 10% window) |
 
-Verdict: **HOLD**. The interval on quality contains zero and reaches past the 1-point
-indifference window. Judge:
+Verdict: **INVESTIGATE**, the worst band across the axes. Latency and cost rose for sure but
+stay inside their minor-regression windows, so the release needs 50 traces read from the
+slower slice and a written reason to ship. Quality holds: its interval contains zero and
+reaches past the 1-point indifference window. Judge:
 claude-opus-5-5, effort medium, rubric 3f1c9a; dataset gate-v7 @ 9e2b44.
 ```

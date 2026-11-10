@@ -68,7 +68,10 @@ run dev twice and count flipped labels before you trust a small change.
    not a statistical law. Low kappa means the rubric is unclear: fix the rubric, don't
    automate it. Order: rubric, then human agreement, then judge calibration.
 3. Split stratified: 10% to 20% train, 40% to 45% dev, 40% to 45% test, with 30 to 50
-   PASS and 30 to 50 FAIL in each of dev and test. The starters use 15 / 40 / 45.
+   PASS and 30 to 50 FAIL in each of dev and test. The starters use 15 / 40 / 45 by a hash
+   of each id, so labeling more rows never moves a row out of test. Class ratios then match
+   only on average: check the per-class counts the run prints, and the warning when the
+   few-shots miss a class.
 4. Iterate on dev. Report PASS recall and FAIL recall separately, with Cohen's kappa
    between judge and humans. Read every disagreement, false passes and false fails
    separately. If the human label is wrong, relabel it.

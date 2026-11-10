@@ -46,7 +46,7 @@ labels flip between identical runs before you trust a small change.
 
 The bar has four parts, all set by flags:
 
-- every split row gets a verdict
+- every split row gets a verdict, and none comes from a fallback model
 - each class has at least 30 rows in the split (`--min-per-class`)
 - PASS and FAIL recall both reach 0.90 (`--min-recall`)
 - kappa between the judge and the humans reaches 0.60 (`--min-kappa`)
@@ -100,14 +100,16 @@ windows:
 
 Some conditions override the band:
 
-- **Block.** Any failing row marked `"must_pass": true` blocks. Give those regression rows
-  code checks where you can, so they don't depend on the judge.
+- **Block.** Any failing row marked `"must_pass": true` blocks, and so does a baseline
+  `must_pass` row that's missing from this run. Give regression rows code checks where you
+  can, so they don't depend on the judge.
 - **Hold.** Any of these turns a ship into a hold:
   - a row with no verdict (a refusal, a budget stop, malformed output)
-  - candidate ids missing from the baseline
+  - candidate ids missing from the baseline, or baseline ids missing from this run
   - fewer than 30 paired rows (`--min-paired`)
   - a verdict served by a fallback model
   - a judge whose fingerprint differs from the calibration record
+  - a calibration record that isn't a passing test read
 - **Exit code.** A first run with no baseline exits 0, unless one of the conditions above
   applies.
 
@@ -117,7 +119,10 @@ before the first judge call.
 Size the indifference window to your gate set. Every run prints the set's resolution: how
 wide the interval is for a candidate that matches the baseline on every row. At a 76% pass
 rate that's about plus or minus 5.3 points with 50 rows, so a 1-point window would hold
-every unchanged candidate; the 1-point default needs about 280 rows. Grow the set, or pass
+every unchanged candidate; the 1-point default needs at least 280 rows. That's a floor for a
+judge that never flips a label: with 2% flips between identical runs it's about 830 rows.
+Calibrate with `--repeats 2` and pass that record with `--calibration`, and the resolution
+uses the measured flip rate. Grow the set, or pass
 `--indifference` at least as wide as the printed resolution.
 
 ## Pinning and cost

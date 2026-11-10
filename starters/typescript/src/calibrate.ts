@@ -99,6 +99,7 @@ export function barFailures(summary: Awaited<ReturnType<typeof calibrate>>, minR
   const r = summary.report;
   const reasons: string[] = [];
   if (summary.errors) reasons.push(summary.errors + " rows got no verdict (see predictions.jsonl)");
+  if (summary.fallback_verdicts) reasons.push(summary.fallback_verdicts + " verdicts came from a fallback model, not this judge");
   for (const [label, n] of Object.entries(summary.split_class_counts)) {
     if (n < minPerClass) reasons.push("only " + n + " " + label + " rows in this split; the bar needs " + minPerClass + " per class");
   }
@@ -106,6 +107,13 @@ export function barFailures(summary: Awaited<ReturnType<typeof calibrate>>, minR
   if (!(r.fail_recall >= minRecall)) reasons.push("fail recall below " + minRecall.toFixed(2));
   if (!(r.kappa >= minKappa)) reasons.push("kappa below " + minKappa.toFixed(2));
   return reasons;
+}
+
+/** The split isn't stratified, so a small train split can miss a class. */
+export function fewShotWarnings(fewShots: Row[]): string[] {
+  if (fewShots.length === 0) return [];
+  const labels = new Set(fewShots.map((r) => r.label));
+  return (["PASS", "FAIL"] as const).filter((l) => !labels.has(l)).map((l) => "the few-shots have no " + l + " example: train holds none; label more rows");
 }
 
 const f = (x: number) => (Number.isFinite(x) ? x.toFixed(3) : "n/a");
@@ -147,14 +155,16 @@ async function main(): Promise<number> {
       minKappa: numberFlag("min-kappa", values["min-kappa"]),
       minPerClass: numberFlag("min-per-class", values["min-per-class"], { integer: true, min: 0 }),
       budget: Budget.fromEnv(),
+      rows: loadJsonl(values.data, true),
+      rubric: readFileSync(values.rubric, "utf8"),
     };
   } catch (err) {
     console.error((err as Error).message);
     return 2;
   }
-  const rows = loadJsonl(values.data, true);
+  const rows = opts.rows;
   const [train, dev, test] = splitRows(rows, opts.seed, TRAIN_FRACTION, DEV_FRACTION);
-  const config = makeConfig(readFileSync(values.rubric, "utf8"), {
+  const config = makeConfig(opts.rubric, {
     ...(values.model ? { model: values.model } : {}),
     ...(values.effort ? { effort: values.effort as Effort } : {}),
   });
@@ -186,6 +196,16 @@ async function main(): Promise<number> {
     },
   });
 
+  const reasons = barFailures(summary, opts.minRecall, opts.minKappa, opts.minPerClass);
+  const warnings = fewShotWarnings(config.fewShots);
+  // Record the result, so run-eval can refuse a calibration that didn't pass.
+  const record = {
+    ...summary,
+    bar: { passed: reasons.length === 0, reasons, min_recall: opts.minRecall, min_kappa: opts.minKappa, min_per_class: opts.minPerClass },
+    warnings,
+  };
+  writeFileSync(join(outDir, "summary.json"), dumps(record, 2) + "\n");
+
   const r = summary.report;
   const c = r.confusion;
   const counts = summary.split_class_counts;
@@ -196,16 +216,16 @@ async function main(): Promise<number> {
   console.log("  confusion TP=" + c.tp + " FN=" + c.fn + " FP=" + c.fp + " TN=" + c.tn);
   if (summary.fallback_verdicts) console.log("  " + summary.fallback_verdicts + " verdicts came from a fallback model, not the calibrated judge");
   if (summary.label_flips_across_repeats) console.log("  " + summary.label_flips_across_repeats + " labels flipped between repeats: treat small moves as noise");
+  for (const warning of warnings) console.log("  warning: " + warning);
   console.log("  estimated cost $" + summary.estimated_cost_usd.toFixed(2) + "   wrote " + outDir);
 
-  const reasons = barFailures(summary, opts.minRecall, opts.minKappa, opts.minPerClass);
   if (reasons.length === 0 && opts.split === "dev") console.log("Dev clears the bar. Run once with --split test and keep that number.");
   else if (reasons.length === 0) console.log("Test clears the bar. This is the judge's calibration record; keep summary.json.");
   else {
     console.log("Not there yet:");
     for (const reason of reasons) console.log("  - " + reason);
     if (opts.split === "dev") console.log("Read disagreements.jsonl, change one thing in the rubric (or label more rows), run again.");
-    else console.log("Don't tune on test. Label fresh rows, calibrate on dev again, then read test once more on the new rows.");
+    else console.log("Don't tune on test. Label a fresh batch, calibrate on dev again, and treat the next test read as a re-read: it includes rows you have already seen.");
   }
   return reasons.length === 0 ? 0 : 1;
 }

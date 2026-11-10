@@ -111,8 +111,10 @@ def corrected_pass_rate(results: list[dict], pass_recall: float | None, fail_rec
     return corrected * len(judged) / len(known)
 
 
-def read_baseline(path: str) -> dict[str, bool]:
+def read_baseline(path: str) -> tuple[dict[str, bool], set[str]]:
+    """The baseline's pass/fail per id, and the ids it marks must_pass."""
     base: dict[str, bool] = {}
+    must_pass: set[str] = set()
     for lineno, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
@@ -124,9 +126,11 @@ def read_baseline(path: str) -> dict[str, bool]:
             raise ValueError(f"{path}:{lineno}: missing 'id' or 'passed'; --baseline takes a results.jsonl from an earlier run")
         if row["passed"] is not None:
             base[row["id"]] = bool(row["passed"])
+        if row.get("must_pass"):
+            must_pass.add(row["id"])
     if not base:
         raise ValueError(f"{path}: no scored rows")
-    return base
+    return base, must_pass
 
 
 def read_calibration(path: str) -> dict:
@@ -161,9 +165,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         budget = Budget.from_env()
         rows = load_jsonl(args.data)
-        base = read_baseline(args.baseline) if args.baseline else None
+        base, base_must_pass = read_baseline(args.baseline) if args.baseline else (None, set())
         calibration = read_calibration(args.calibration) if args.calibration else None
         rubric = Path(args.rubric).read_text(encoding="utf-8")
+        labeled = load_jsonl(args.labeled, require_label=True) if args.labeled else None
     except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -172,18 +177,30 @@ def main(argv: list[str] | None = None) -> int:
         config.model = args.model
     if args.effort:
         config.effort = args.effort
-    if args.labeled:
-        train, _, _ = split_rows(load_jsonl(args.labeled, require_label=True), seed=args.seed)
+    if labeled is not None:
+        train, _, _ = split_rows(labeled, seed=args.seed)
         config.few_shots = pick_few_shots(train, n=args.few_shots)
+    for label in ("PASS", "FAIL"):
+        if labeled is not None and config.few_shots and label not in {r.get("label") for r in config.few_shots}:
+            print(f"warning: the few-shots have no {label} example: train holds none; label more rows", file=sys.stderr)
     if budget.limit_usd is not None and not price_known(config.model):
         print(f"EVAL_BUDGET_USD is set but there's no price for {config.model} in evals/judge.py PRICES.", file=sys.stderr)
         return 2
 
     holds: list[str] = []
-    judge_matches = True
-    if calibration and calibration["judge"] != config.describe():
-        judge_matches = False
-        holds.append("this judge (model, effort, prompt or few-shots) differs from the calibrated one; calibrate again")
+    calibration_ok = False
+    flip_rate = 0.0
+    if calibration:
+        bar = calibration.get("bar") or {}
+        if calibration["judge"] != config.describe():
+            holds.append("this judge (model, effort, prompt or few-shots) differs from the calibrated one; calibrate again")
+        elif calibration.get("split") != "test" or not bar.get("passed"):
+            holds.append("the calibration record isn't a passing test read; calibrate on dev until it clears the bar, then read test")
+        else:
+            calibration_ok = True
+        flips, scored = calibration.get("label_flips_across_repeats"), calibration.get("report", {}).get("n")
+        if flips is not None and scored:
+            flip_rate = flips / scored
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = Path(args.out) / f"{stamp}-eval"
@@ -229,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         "errors": len(errors),
         "estimated_cost_usd": round(budget.spent_usd, 4),
     }
-    if calibration and judge_matches:
+    if calibration_ok:
         cr = calibration["report"]
         summary["pass_rate_corrected"] = corrected_pass_rate(results, cr.get("pass_recall"), cr.get("fail_recall"))
 
@@ -240,6 +257,14 @@ def main(argv: list[str] | None = None) -> int:
         unpaired = sorted(set(cand) - set(base))
         if unpaired:
             holds.append(f"{len(unpaired)} ids aren't in the baseline and weren't compared: {', '.join(unpaired[:10])}")
+        absent = sorted(set(base) - {r["id"] for r in results})
+        if absent:
+            holds.append(f"{len(absent)} baseline ids are missing from this run: {', '.join(absent[:10])}")
+        absent_must = sorted(set(absent) & base_must_pass)
+        if absent_must:
+            # A regression row the candidate didn't produce can't count as passing.
+            must_fail = must_fail + absent_must
+            summary["must_pass_failures"] = must_fail
         if not set(cand) & set(base):
             print("The baseline shares no scored ids with this run.", file=sys.stderr)
             (out_dir / "summary.json").write_text(dumps(summary, indent=2) + "\n")
@@ -250,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
             holds.append(f"only {d.n} paired rows; a ship needs at least {args.min_paired}")
         summary["vs_baseline"] = {
             "n": d.n, "baseline_rate": d.baseline_rate, "candidate_rate": d.candidate_rate,
-            "delta": d.delta, "ci": list(d.ci), "band": verdict, "unpaired_ids": unpaired,
+            "delta": d.delta, "ci": list(d.ci), "band": verdict, "unpaired_ids": unpaired, "missing_ids": absent,
             "paired_counts": {"both_pass": d.both_pass, "baseline_only": d.baseline_only,
                               "candidate_only": d.candidate_only, "both_fail": d.both_fail},
         }
@@ -259,14 +284,18 @@ def main(argv: list[str] | None = None) -> int:
     res_n, res_rate = (summary["vs_baseline"]["n"], summary["vs_baseline"]["baseline_rate"]) if "vs_baseline" in summary else (len(known), rate)
     notes: list[str] = []
     if res_n and res_rate == res_rate:
-        half = no_change_halfwidth(res_n, res_rate)
-        needed = rows_for_indifference(res_rate, args.indifference, start=res_n)
-        summary["resolution"] = {"n": res_n, "no_change_halfwidth": half, "rows_for_indifference": needed}
+        half = no_change_halfwidth(res_n, res_rate, flip_rate)
+        needed = rows_for_indifference(res_rate, args.indifference, start=res_n, flip_rate=flip_rate)
+        summary["resolution"] = {"n": res_n, "flip_rate": flip_rate, "no_change_halfwidth": half,
+                                 "rows_for_indifference": needed}
+        flips_text = (f" with the judge flipping {flip_rate:.1%} of labels between runs" if flip_rate
+                      else " (a floor: it assumes the judge never flips a label; calibrate with --repeats 2 to measure flips)")
         if half > args.indifference:
             notes.append(
-                f"with {res_n} rows at this pass rate, an unchanged candidate's interval is about +-{half:.3f}, wider than "
-                f"the {args.indifference:.3f} indifference window, so no candidate can ship by staying the same. "
-                f"Grow the gate set to about {needed} rows" + (f", or pass --indifference {half:.3f} or more" if needed else "")
+                f"with {res_n} rows at this pass rate{flips_text}, an unchanged candidate's interval is about +-{half:.3f}, "
+                f"wider than the {args.indifference:.3f} indifference window, so no candidate can ship by staying the same. "
+                + (f"Grow the gate set to about {needed} rows, or pass --indifference {half:.3f} or more" if needed
+                   else f"Pass --indifference {half:.3f} or more")
             )
     summary["notes"] = notes
     if must_fail:

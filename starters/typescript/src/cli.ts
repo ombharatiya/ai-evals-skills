@@ -16,7 +16,8 @@ export function isMain(importMetaUrl: string): boolean {
 /** Parse a numeric flag, or throw a message naming the flag. */
 export function numberFlag(name: string, raw: string | undefined, { integer = false, min = -Infinity } = {}): number {
   const value = Number(raw);
-  if (raw === undefined || raw.trim() === "" || !Number.isFinite(value) || value < min || (integer && !Number.isInteger(value))) {
+  const badInteger = integer && (!/^-?\d+$/.test((raw ?? "").trim()) || !Number.isSafeInteger(value));
+  if (raw === undefined || raw.trim() === "" || !Number.isFinite(value) || value < min || badInteger) {
     throw new Error("--" + name + " must be " + (integer ? "an integer" : "a number") + (min > -Infinity ? " of at least " + min : "") + ", got " + String(raw));
   }
   return value;

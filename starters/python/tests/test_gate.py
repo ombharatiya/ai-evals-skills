@@ -48,3 +48,10 @@ def test_resolution_says_how_many_rows_a_window_needs():
     assert rows_for_indifference(0.76, 0.01) == 278
     assert rows_for_indifference(0.97, 0.01) == 408
     assert no_change_halfwidth(278, 0.76) <= 0.01 < no_change_halfwidth(277, 0.76)
+
+
+def test_resolution_accounts_for_judge_flips():
+    from evals.gate import rows_for_indifference
+
+    assert rows_for_indifference(0.76, 0.01, flip_rate=0.02) == 831
+    assert rows_for_indifference(0.76, 0.01, flip_rate=0.05) == 1959

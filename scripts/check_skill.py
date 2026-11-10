@@ -36,7 +36,11 @@ else:
 if len(text.splitlines()) >= 500:
     errors.append("SKILL.md: keep it under 500 lines")
 
-files = sorted(p for p in ROOT.rglob("*.md*") if "node_modules" not in p.parts and ".git" not in p.parts)
+import subprocess
+
+# Only files tracked in git, so a local venv or node_modules never trips the check.
+tracked = subprocess.run(["git", "ls-files", "*.md", "*.mdc"], cwd=ROOT, capture_output=True, text=True, check=True)
+files = sorted(ROOT / line for line in tracked.stdout.splitlines() if line)
 for path in files:
     body = path.read_text(encoding="utf-8")
     for target in re.findall(r"\]\(([^)#]+)\)", body):

@@ -49,7 +49,8 @@ explain a choice.
 
 - Error analysis: 100+ traces, first failure per trace, 4 to 7 categories.
 - Labels: 100 to 200 per failure mode; 30 to 50 PASS and 30 to 50 FAIL in each of dev and
-  test; split 15 / 40 / 45, stratified.
+  test; split 15 / 40 / 45, stratified, and never move a row out of test once it's been
+  read.
 - Judge bar: PASS and FAIL recall at least 0.90 on dev (this site's default), confirmed on
   test once.
 - Human agreement: kappa at least 0.6 to proceed, 0.8 for a gold set or a release gate.
