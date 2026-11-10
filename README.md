@@ -17,8 +17,14 @@ This repo has three parts:
 
 ### Claude Code
 
+Run these two commands in Claude Code, one at a time. Pasted together, they arrive as one
+command and the second doesn't run.
+
 ```text
 /plugin marketplace add ombharatiya/ai-evals-skills
+```
+
+```text
 /plugin install ai-evals@ai-evals-skills
 ```
 
